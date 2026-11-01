@@ -1,0 +1,63 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+      # The end-to-end tests run the real restic, the release the installer pins.
+      - name: restic 0.19.1
+        run: |
+          curl -fsSL -o r.bz2 https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2
+          echo "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  r.bz2" | sha256sum -c
+          bunzip2 r.bz2 && chmod +x r && sudo mv r /usr/local/bin/restic
+      - run: make test
+
+  # The image scripts/install.sh copies the daemon out of; after the tests.
+  image:
+    name: publish image
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+      - run: make image-ctx
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: tags
+        run: |
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          IMG=ghcr.io/$owner/shrooms-backup
+          t="$IMG:${{ github.sha }}"
+          case "${{ github.ref }}" in
+            refs/heads/main) t="$t,$IMG:latest" ;;
+          esac
+          case "${{ github.ref }}" in
+            refs/tags/v*) t="$t,$IMG:${GITHUB_REF_NAME}" ;;
+          esac
+          echo "list=$t" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: build
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          provenance: false
