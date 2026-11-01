@@ -167,6 +167,15 @@ func TestSettings(t *testing.T) {
 	}
 	body := `{"owners":["phone"],"always_on":true,"mirror":false,"quota_gb":50,` +
 		`"source":{"presets":["shrooms","keys"],"times":["04:30"],"mirrors":["scribe","vps"]}}`
+	resp, err := http.Get(mesh_.URL + "/v1/peers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), `"self":"proteus"`) || !strings.Contains(string(b), `"name":"phone"`) {
+		t.Errorf("peers: %s", b)
+	}
 	if code := put(mesh_.URL, body); code != 403 {
 		t.Errorf("a device that is not an owner changed the settings: %d", code)
 	}

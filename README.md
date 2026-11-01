@@ -45,6 +45,14 @@ its owners. Needs the Shrooms module. `nix build ./basecamp/core#lgx-portable`
 and `./basecamp/view#lgx-portable` (add `packages.aarch64-linux.` for arm64,
 then `lgx merge`); `basecamp/test/check.sh` loads the view against a fake core.
 
+## On the phone
+
+`mobile/`: the same Overview, Metrics and Settings, for Android (Expo).
+Tell it one machine (`proteus.office.mesh`); it finds the rest through that
+machine's daemon. `npm test` checks the model; the APK is built with
+`npx expo prebuild --platform android` and `./gradlew assembleRelease`
+in `android/` (JDK 17), unsigned, for the publisher to sign.
+
 ## Build and test
 
 `make test` (needs restic for the end-to-end tests: `RESTIC=path` or on

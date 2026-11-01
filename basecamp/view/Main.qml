@@ -306,7 +306,8 @@ Item {
                 if (n === 0) return
                 var max = Math.max.apply(null, v) || 1
                 var min = bars.fromZero ? 0 : Math.min.apply(null, v)
-                var base = min - (max - min) * 0.1
+                // Never closer than 5% of the most: 2 KB on 40 MB is no step.
+                var base = min - Math.max((max - min) * 0.1, max * 0.05)
                 if (max - base <= 0) base = max - 1
                 var w = width / Math.max(n, 20)
                 for (var i = 0; i < n; i++) {

@@ -323,6 +323,10 @@ func (d *Daemon) Handler(local bool) http.Handler {
 	mux.HandleFunc("POST /v1/run", d.runNow)
 	mux.HandleFunc("GET /v1/runs", d.getRuns)
 	mux.HandleFunc("PUT /v1/config", d.putConfig)
+	// The phone app knows one machine; this is how it finds the others.
+	mux.HandleFunc("GET /v1/peers", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"self": d.Mesh.Self(), "peers": d.Mesh.Peers()})
+	})
 	mux.HandleFunc("GET /v1/presets", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, Presets) })
 	mux.HandleFunc("/v1/repo/{source}/", d.repo)
 	if local && d.self != nil {

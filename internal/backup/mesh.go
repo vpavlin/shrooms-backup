@@ -157,3 +157,23 @@ func (m *Mesh) Set(self string, peers map[string]netip.Addr) {
 	m.st, m.names = st, names
 	m.mu.Unlock()
 }
+
+// Peer is a device on this machine's meshes, as the apps see it.
+type Peer struct {
+	Name      string `json:"name"`
+	Mesh      string `json:"mesh"`
+	Overlay   string `json:"overlay"`
+	OverlayV4 string `json:"overlay_v4,omitempty"`
+	Online    bool   `json:"online"`
+}
+
+// Peers are the devices on this machine's meshes, one entry a mesh.
+func (m *Mesh) Peers() []Peer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Peer{}
+	for _, p := range m.st.Peers {
+		out = append(out, Peer{Name: p.Name, Mesh: p.Mesh, Overlay: p.Overlay, OverlayV4: p.OverlayV4, Online: p.Online == nil || *p.Online})
+	}
+	return out
+}

@@ -165,3 +165,17 @@ added, repository size, duration; a failed run red) and Settings. It finds
 the daemons by asking every peer `shrooms_core` knows. Plain QtQuick in the
 Shrooms palette, for the Shrooms view's reason: the bundled design system
 differs between Basecamp versions. Built for amd64 and arm64 in one lgx.
+
+## The phone app (2026-11-01)
+
+**Shrooms Backup for Android** (`mobile/`, `xyz.vpavlin.shrooms.backup`): the
+Basecamp view's three screens, as an Expo app like Foray's. A phone runs no
+daemon and cannot ask a shrooms daemon for the mesh, so it is told one
+machine (its mesh name, or a `shroomsbackup://add?address=` link) and asks
+that daemon's new `GET /v1/peers` for the rest, then every online peer's
+`/v1/info`: the IPv6 overlay first, the IPv4 alias where that fails.
+What it last saw is kept and shown at once on open, marked "as last seen"
+for a machine that did not answer. The phone is an owner by its mesh name,
+like any device. The release build is unsigned (`plugins/withUnsignedRelease.js`)
+for the publisher to sign. Keys from Keycard come next, in this app: they
+need an NFC module and the card.
