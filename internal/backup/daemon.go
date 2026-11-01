@@ -74,8 +74,17 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := c.fill(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &c, nil
+}
+
+// fill checks a config and fills in its defaults; the settings the apps
+// send go through it too.
+func (c *Config) fill() error {
 	if c.Mesh == "" {
-		return nil, fmt.Errorf("%s: which mesh do backups run on (\"mesh\")?", path)
+		return errors.New("which mesh do backups run on (\"mesh\")?")
 	}
 	if c.Node.Bin == "" {
 		c.Node.Bin = "/usr/local/lib/shrooms-backup/logos-storage"
@@ -89,16 +98,34 @@ func LoadConfig(path string) (*Config, error) {
 	if c.Node.QuotaGB == 0 {
 		c.Node.QuotaGB = 50
 	}
+	if c.Node.QuotaGB < 0 {
+		return errors.New("a quota is a number of GB")
+	}
 	if c.Restic == "" {
 		c.Restic = "restic"
 	}
+	for _, o := range c.Owners {
+		if !deviceName.MatchString(o) {
+			return fmt.Errorf("owner %q is not a device name", o)
+		}
+	}
 	if s := c.Source; s != nil {
 		if len(s.Paths)+len(s.Presets) == 0 || len(s.Mirrors) == 0 {
-			return nil, fmt.Errorf("%s: a source needs presets or paths, and mirrors", path)
+			return errors.New("a source needs presets or paths, and mirrors")
 		}
 		for _, p := range s.Presets {
 			if _, ok := Presets[p]; !ok {
-				return nil, fmt.Errorf("%s: no preset %q", path, p)
+				return fmt.Errorf("no preset %q", p)
+			}
+		}
+		for _, p := range s.Paths {
+			if !filepath.IsAbs(p) {
+				return fmt.Errorf("path %q is not absolute", p)
+			}
+		}
+		for _, m := range s.Mirrors {
+			if !deviceName.MatchString(m) {
+				return fmt.Errorf("mirror %q is not a device name", m)
 			}
 		}
 		if len(s.Times) == 0 {
@@ -106,7 +133,7 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		for _, t := range s.Times {
 			if _, err := time.Parse("15:04", t); err != nil {
-				return nil, fmt.Errorf("%s: time %q: want HH:MM", path, t)
+				return fmt.Errorf("time %q: want HH:MM", t)
 			}
 		}
 		if s.KeepDaily == 0 {
@@ -115,8 +142,11 @@ func LoadConfig(path string) (*Config, error) {
 		if s.KeepWeekly == 0 {
 			s.KeepWeekly = 12
 		}
+		if s.KeepDaily < 0 || s.KeepWeekly < 0 {
+			return errors.New("keep a number of days and weeks")
+		}
 	}
-	return &c, nil
+	return nil
 }
 
 // Daemon is shrooms-backup on one machine.
@@ -134,6 +164,11 @@ type Daemon struct {
 	// (default: its mesh address). Both for tests.
 	LocalURL string
 	PeerURL  func(device string) (string, error)
+	// ConfigPath is where the apps' settings are saved; Restart, when a
+	// setting cannot change under a running node (the mirror role, the
+	// quota), ends the daemon for systemd to start again.
+	ConfigPath string
+	Restart    func()
 
 	mu      sync.Mutex
 	self    *Repo
@@ -141,6 +176,7 @@ type Daemon struct {
 	sprs    map[string]string // device -> its node's SPR
 	runs    []Run
 	running bool
+	wake    chan struct{} // the schedule, when the times change
 	client  *http.Client
 	ctx     context.Context // set by Start: a copy made after it gets its loop then
 }
@@ -161,11 +197,20 @@ type Run struct {
 	Error    string            `json:"error,omitempty"`
 	Added    string            `json:"added,omitempty"` // restic's "Added to the repository"
 	Mirrors  map[string]string `json:"mirrors"`         // device -> "ok" or why not
+	// From restic's summary: what it read, and what was new or changed.
+	Files     int64 `json:"files,omitempty"`
+	FilesNew  int64 `json:"files_new,omitempty"`
+	FilesMod  int64 `json:"files_changed,omitempty"`
+	Bytes     int64 `json:"bytes,omitempty"`
+	DataAdded int64 `json:"data_added,omitempty"`
+	// Stored is the repository's size after the run: what each mirror holds.
+	Stored int64 `json:"stored,omitempty"`
 }
 
 // Open loads the state.
 func (d *Daemon) Open() error {
 	d.mirrors, d.sprs = map[string]*mirrorCopy{}, map[string]string{}
+	d.wake = make(chan struct{}, 1)
 	d.client = &http.Client{Timeout: 30 * time.Second}
 	if b, err := os.ReadFile(filepath.Join(d.State, "sprs.json")); err == nil {
 		json.Unmarshal(b, &d.sprs)
@@ -277,6 +322,7 @@ func (d *Daemon) Handler(local bool) http.Handler {
 	mux.HandleFunc("GET /v1/mirror/{source}", d.getMirror)
 	mux.HandleFunc("POST /v1/run", d.runNow)
 	mux.HandleFunc("GET /v1/runs", d.getRuns)
+	mux.HandleFunc("PUT /v1/config", d.putConfig)
 	mux.HandleFunc("GET /v1/presets", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, Presets) })
 	mux.HandleFunc("/v1/repo/{source}/", d.repo)
 	if local && d.self != nil {
@@ -301,7 +347,18 @@ func (d *Daemon) Handler(local bool) http.Handler {
 
 func callerOf(r *http.Request) caller { c, _ := r.Context().Value(ctxKey{}).(caller); return c }
 
-func (d *Daemon) owner(c caller) bool { return c.local || slices.Contains(d.Cfg.Owners, c.name) }
+func (d *Daemon) owner(c caller) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return c.local || slices.Contains(d.Cfg.Owners, c.name)
+}
+
+// source is this machine's source config; the apps may replace it.
+func (d *Daemon) source() *SourceConfig {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.Cfg.Source
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -321,13 +378,21 @@ type Info struct {
 	SPR      string        `json:"spr"`
 	Quota    int64         `json:"quota"`
 	Used     int64         `json:"used"`
+	QuotaGB  int64         `json:"quota_gb"`
+	Owners   []string      `json:"owners"`
 	Source   *SourceConfig `json:"source,omitempty"`
 	LastRun  *Run          `json:"last_run,omitempty"`
-	Holds    []string      `json:"holds"` // sources this machine mirrors
+	Running  bool          `json:"running"`
+	Next     *time.Time    `json:"next,omitempty"` // the next scheduled run
+	Holds    []string      `json:"holds"`          // sources this machine mirrors
+	// Held is how far each of those copies is, and its size.
+	Held []MirrorStatus `json:"held"`
+	// Owner: the caller may change the settings and start runs.
+	Owner bool `json:"owner"`
 }
 
 func (d *Daemon) Info(ctx context.Context) Info {
-	in := Info{Name: d.Mesh.Self(), Mirror: d.Cfg.Mirror, AlwaysOn: d.Cfg.AlwaysOn, Source: d.Cfg.Source, Holds: []string{}}
+	in := Info{Name: d.Mesh.Self(), Holds: []string{}, Held: []MirrorStatus{}}
 	if st, ok := d.Store.(*Storage); ok {
 		in.SPR, _ = st.SPR(ctx)
 		if sp, err := st.Space(ctx); err == nil {
@@ -335,25 +400,47 @@ func (d *Daemon) Info(ctx context.Context) Info {
 		}
 	}
 	d.mu.Lock()
+	in.Mirror, in.AlwaysOn, in.QuotaGB, in.Source = d.Cfg.Mirror, d.Cfg.AlwaysOn, d.Cfg.Node.QuotaGB, d.Cfg.Source
+	in.Owners = append([]string{}, d.Cfg.Owners...)
+	in.Running = d.running
+	if in.Source != nil {
+		next := nextTime(time.Now(), in.Source.Times)
+		in.Next = &next
+	}
+	names := []string{}
 	for s := range d.mirrors {
-		in.Holds = append(in.Holds, s)
+		names = append(names, s)
 	}
 	if n := len(d.runs); n > 0 {
 		last := d.runs[n-1]
 		in.LastRun = &last
 	}
 	d.mu.Unlock()
-	slices.Sort(in.Holds)
+	slices.Sort(names)
+	for _, s := range names {
+		d.mu.Lock()
+		mc := d.mirrors[s]
+		d.mu.Unlock()
+		in.Holds = append(in.Holds, s)
+		in.Held = append(in.Held, d.mirrorStatus(s, mc))
+	}
 	return in
 }
 
-func (d *Daemon) info(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, d.Info(r.Context())) }
+func (d *Daemon) info(w http.ResponseWriter, r *http.Request) {
+	in := d.Info(r.Context())
+	in.Owner = d.owner(callerOf(r))
+	writeJSON(w, 200, in)
+}
 
 // putMirror: a source hands its newest map; this mirror fetches what it lacks
 // and adopts the map once it holds all of it.
 func (d *Daemon) putMirror(w http.ResponseWriter, r *http.Request) {
 	c, source := callerOf(r), r.PathValue("source")
-	if !d.Cfg.Mirror {
+	d.mu.Lock()
+	mirror := d.Cfg.Mirror
+	d.mu.Unlock()
+	if !mirror {
 		fail(w, http.StatusForbidden, errors.New("this machine is not a mirror"))
 		return
 	}
@@ -395,12 +482,14 @@ type MirrorStatus struct {
 	Pending int64  `json:"pending"`
 	Missing int    `json:"missing"`
 	Error   string `json:"error,omitempty"`
+	Bytes   int64  `json:"bytes"` // the adopted copy's size, held deletions included
 }
 
 func (d *Daemon) mirrorStatus(source string, mc *mirrorCopy) MirrorStatus {
+	m := mc.repo.Map()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return MirrorStatus{Source: source, Adopted: mc.repo.Map().Version, Pending: mc.pending, Missing: mc.missing, Error: mc.err}
+	return MirrorStatus{Source: source, Adopted: m.Version, Pending: mc.pending, Missing: mc.missing, Error: mc.err, Bytes: m.Size(true)}
 }
 
 func (d *Daemon) getMirror(w http.ResponseWriter, r *http.Request) {
@@ -528,7 +617,7 @@ func (d *Daemon) runNow(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, errors.New("owners only"))
 		return
 	}
-	if d.Cfg.Source == nil {
+	if d.source() == nil {
 		fail(w, http.StatusBadRequest, errors.New("this machine backs nothing up"))
 		return
 	}
@@ -552,9 +641,10 @@ func (d *Daemon) Start(ctx context.Context) {
 	for s, mc := range d.mirrors {
 		go d.fetchLoop(ctx, s, mc)
 	}
+	source := d.Cfg.Source
 	d.mu.Unlock()
 	go d.expireLoop(ctx)
-	if d.Cfg.Source != nil {
+	if source != nil {
 		go d.schedule(ctx)
 	}
 }
@@ -582,11 +672,13 @@ func (d *Daemon) expireLoop(ctx context.Context) {
 
 func (d *Daemon) schedule(ctx context.Context) {
 	for {
-		next := nextTime(time.Now(), d.Cfg.Source.Times)
+		next := nextTime(time.Now(), d.source().Times)
 		d.Log.Info("next backup", "at", next.Format(time.RFC3339))
 		select {
 		case <-ctx.Done():
 			return
+		case <-d.wake:
+			continue
 		case <-time.After(time.Until(next)):
 		}
 		d.RunSource(ctx)
@@ -662,7 +754,7 @@ func (d *Daemon) restic(ctx context.Context, args ...string) (string, error) {
 }
 
 func (d *Daemon) runSource(ctx context.Context, run *Run) error {
-	s := d.Cfg.Source
+	s := d.source()
 	if _, err := os.Stat(d.Key); err != nil {
 		return fmt.Errorf("no key (%s): set it with the card, or `shrooms-backup key`", d.Key)
 	}
@@ -688,19 +780,17 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 	if len(paths) == 0 {
 		return errors.New("none of this source's paths exist here")
 	}
-	args := []string{"backup", "--no-scan", "--host", d.Mesh.Self()}
+	args := []string{"backup", "--json", "--no-scan", "--host", d.Mesh.Self()}
 	for _, e := range exclude {
 		args = append(args, "--exclude", e)
 	}
 	out, err := d.restic(ctx, append(args, paths...)...)
 	// restic exits 3 when some files could not be read, having saved the rest.
-	if err != nil && !strings.Contains(out, "snapshot") {
-		return err
-	}
-	for _, l := range strings.Split(out, "\n") {
-		if strings.HasPrefix(l, "Added to the repository") {
-			run.Added = strings.TrimSpace(strings.TrimPrefix(l, "Added to the repository:"))
+	if !summarize(out, run) {
+		if err == nil {
+			err = errors.New("restic did not say what it saved")
 		}
+		return err
 	}
 	// Retention: forget every run; prune, which reads packs, once a day.
 	forget := []string{"forget", "--host", d.Mesh.Self(), "--keep-daily", strconv.Itoa(s.KeepDaily), "--keep-weekly", strconv.Itoa(s.KeepWeekly)}
@@ -711,6 +801,7 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 		return err
 	}
 	m := d.self.Map()
+	run.Stored = m.Size(false)
 	if err := d.pushAll(ctx, m, run); err != nil {
 		return err
 	}
@@ -739,7 +830,7 @@ func (d *Daemon) pushAll(ctx context.Context, m Map, run *Run) error {
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	for _, mirror := range d.Cfg.Source.Mirrors {
+	for _, mirror := range d.source().Mirrors {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

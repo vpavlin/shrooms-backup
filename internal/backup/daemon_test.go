@@ -65,6 +65,9 @@ func TestASourceAndItsMirror(t *testing.T) {
 	if !run.OK || run.Mirrors["proteus"] != "ok" {
 		t.Fatalf("run: %+v", run)
 	}
+	if run.Files != 10 || run.FilesNew != 10 || run.Bytes < 500000 || run.DataAdded == 0 || run.Stored == 0 {
+		t.Errorf("run's numbers: %+v", run)
+	}
 	if n := net.node("laptop").count(); n != 0 {
 		t.Errorf("the source kept %d objects after every mirror had them", n)
 	}
@@ -130,5 +133,65 @@ func TestNextTime(t *testing.T) {
 	}
 	if got := nextTime(now, []string{"03:00"}); got.Hour() != 3 || got.Day() != 2 {
 		t.Errorf("got %v", got)
+	}
+}
+
+// Settings from the apps: owners only; times and owners apply at once; the
+// mirror role restarts the daemon; a bad setting is refused and not saved.
+func TestSettings(t *testing.T) {
+	mesh := &Mesh{}
+	mesh.Set("proteus", map[string]netip.Addr{"phone": netip.MustParseAddr("127.0.0.1")})
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	restarted := make(chan bool, 1)
+	cfg := &Config{Mesh: "office", Source: &SourceConfig{Presets: []string{"shrooms"}, Mirrors: []string{"scribe"}}}
+	if err := cfg.fill(); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{Cfg: cfg, State: t.TempDir(), Log: slog.New(slog.DiscardHandler), Mesh: mesh, Store: newNetwork().node("proteus"),
+		ConfigPath: cfgPath, Restart: func() { restarted <- true }}
+	if err := d.Open(); err != nil {
+		t.Fatal(err)
+	}
+	mesh_ := httptest.NewServer(d.Handler(false))
+	defer mesh_.Close()
+	local := httptest.NewServer(d.Handler(true))
+	defer local.Close()
+	put := func(url, body string) int {
+		req, _ := http.NewRequest("PUT", url+"/v1/config", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	body := `{"owners":["phone"],"always_on":true,"mirror":false,"quota_gb":50,` +
+		`"source":{"presets":["shrooms","keys"],"times":["04:30"],"mirrors":["scribe","vps"]}}`
+	if code := put(mesh_.URL, body); code != 403 {
+		t.Errorf("a device that is not an owner changed the settings: %d", code)
+	}
+	if code := put(local.URL, body); code != 200 {
+		t.Fatalf("this machine could not: %d", code)
+	}
+	if s := d.source(); s.Times[0] != "04:30" || len(s.Mirrors) != 2 || s.KeepDaily != 14 {
+		t.Errorf("not applied: %+v", s)
+	}
+	saved, err := LoadConfig(cfgPath)
+	if err != nil || !saved.AlwaysOn || saved.Mesh != "office" || len(saved.Source.Presets) != 2 {
+		t.Errorf("saved: %+v %v", saved, err)
+	}
+	if code := put(mesh_.URL, strings.Replace(body, `"mirror":false`, `"mirror":true`, 1)); code != 202 {
+		t.Errorf("an owner made it a mirror: %d", code)
+	}
+	select {
+	case <-restarted:
+	case <-time.After(5 * time.Second):
+		t.Error("becoming a mirror did not restart the daemon")
+	}
+	if code := put(local.URL, strings.Replace(body, `"04:30"`, `"25:00"`, 1)); code != 400 {
+		t.Errorf("a bad time: %d", code)
+	}
+	if saved, _ := LoadConfig(cfgPath); !saved.Mirror {
+		t.Error("a refused setting overwrote the saved ones")
 	}
 }

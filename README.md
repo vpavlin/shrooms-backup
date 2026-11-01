@@ -36,6 +36,15 @@ Storage node on the mesh address, serves its API on that address (TCP 7394)
 and on loopback (7395, where restic reaches this machine's repository), and
 learns the mesh from the Shrooms daemon's control socket.
 
+## In Basecamp
+
+`basecamp/core` (`shrooms_backup_core`) and `basecamp/view`
+(`shrooms_backup`): every daemon you can reach, what each backs up, where its
+copies are, how its runs went, and its settings, editable from a device among
+its owners. Needs the Shrooms module. `nix build ./basecamp/core#lgx-portable`
+and `./basecamp/view#lgx-portable` (add `packages.aarch64-linux.` for arm64,
+then `lgx merge`); `basecamp/test/check.sh` loads the view against a fake core.
+
 ## Build and test
 
 `make test` (needs restic for the end-to-end tests: `RESTIC=path` or on

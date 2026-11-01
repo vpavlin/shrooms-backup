@@ -123,7 +123,9 @@ func daemon(args []string) error {
 	if err != nil {
 		return err
 	}
-	d := &backup.Daemon{Cfg: cfg, State: *state, Key: *key, Log: log, Mesh: mesh, Node: node, Store: node.Storage(), Cache: cache}
+	d := &backup.Daemon{Cfg: cfg, State: *state, Key: *key, Log: log, Mesh: mesh, Node: node, Store: node.Storage(), Cache: cache,
+		// systemd starts it again (Restart=always) with the saved settings.
+		ConfigPath: *cfgPath, Restart: func() { time.Sleep(time.Second); stop() }}
 	if err := d.Open(); err != nil {
 		return err
 	}

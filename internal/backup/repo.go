@@ -346,3 +346,14 @@ func (r *Repo) lock(w http.ResponseWriter, req *http.Request, key string) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// Size is what the map's objects take, the held deletions too if held.
+func (m Map) Size(held bool) int64 {
+	var n int64
+	for _, o := range m.Objects {
+		if o.Deleted == nil || held {
+			n += o.Size
+		}
+	}
+	return n
+}
