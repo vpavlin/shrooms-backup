@@ -35,6 +35,7 @@ Item {
     readonly property bool haveCore: !!bridge && !!bridge.callModule
 
     property string self: ""          // this device's mesh name
+    property var peerNames: []        // every device on its meshes, online or not
     property string problem: ""
     property var machines: []         // [{key, address, name, mesh, local, info}]
     property string selected: ""      // a machine's name
@@ -68,7 +69,9 @@ Item {
         }
         root.problem = ""
         root.self = st.name || ""
-        var out = [], ps = st.peers || []
+        var out = [], ps = st.peers || [], names = {}
+        for (var k = 0; k < ps.length; k++) if (ps[k].name) names[ps[k].name] = true
+        root.peerNames = Object.keys(names).sort()
         for (var j = 0; j < ps.length; j++)
             if (ps[j].online !== false && ps[j].overlay) out.push(ps[j].name + "|" + (ps[j].mesh || "") + "|" + ps[j].overlay)
         return out.join(";")
@@ -166,6 +169,19 @@ Item {
     }
     function seconds(run) {
         return Math.max(0, (new Date(run.finished).getTime() - new Date(run.started).getTime()) / 1000)
+    }
+    function whatOf(source) {
+        var w = (source.presets || []).slice(), n = (source.paths || []).length
+        if (n) w.push(n === 1 ? source.paths[0] : n + " folders")
+        return w.join(", ")
+    }
+    // A run from before the daemon kept restic's summary has its words only.
+    function runText(r) {
+        if (!r.ok) return r.error || "failed"
+        var t = (r.added || "nothing") + " new"
+        if (r.files !== undefined)
+            t += "; " + (r.files_new || 0) + " new and " + (r.files_changed || 0) + " changed of " + r.files + " files"
+        return t
     }
     function roleOf(info) {
         var r = []
@@ -406,8 +422,7 @@ Item {
                                         Text { text: src.modelData.name; color: root.cBone; font.pixelSize: 15; font.bold: true }
                                         Dim {
                                             Layout.fillWidth: true
-                                            text: (src.info.source.presets || []).join(", ")
-                                                  + ((src.info.source.paths || []).length ? " + " + src.info.source.paths.length + " paths" : "")
+                                            text: root.whatOf(src.info.source)
                                         }
                                         Btn {
                                             text: src.info.running ? "Backing up..." : "Back up now"
@@ -537,10 +552,11 @@ Item {
                             labelOf: root.size
                         }
                         Bars {
+                            readonly property var sized: parent.rs.filter(function(r) { return r.stored !== undefined })
                             width: parent.width; visible: !!parent.info.source
                             title: "Repository size"; colour: root.cViolet; fromZero: false
-                            values: parent.rs.map(function(r) { return r.stored || 0 })
-                            failed: parent.rs.map(function(r) { return !r.ok })
+                            values: sized.map(function(r) { return r.stored })
+                            failed: sized.map(function(r) { return !r.ok })
                             labelOf: root.size
                         }
                         Bars {
@@ -561,8 +577,7 @@ Item {
                                 Dim { width: 60; text: root.took(modelData) }
                                 Dim {
                                     width: mt.availableWidth - 230
-                                    text: modelData.ok ? (modelData.added || "nothing") + " new; " + (modelData.files_new || 0) + " new and " + (modelData.files_changed || 0) + " changed of " + (modelData.files || 0) + " files"
-                                          : modelData.error
+                                    text: root.runText(modelData)
                                     color: modelData.ok ? root.cAsh : root.cRust
                                     elide: Text.ElideRight; wrapMode: Text.NoWrap
                                 }
@@ -648,9 +663,12 @@ Item {
             keys(mirrorsChosen).forEach(function(n) { if (!out.some(function(o) { return o.name === n })) out.push({ name: n, about: "not reachable from here" }) })
             return out
         }
+        // Owners: any device on the meshes, not only those with a daemon: a
+        // tablet that only looks runs none.
         readonly property var ownerChoices: {
             var names = {}
             root.machines.forEach(function(m) { names[m.name] = true })
+            root.peerNames.forEach(function(n) { names[n] = true })
             if (root.self) names[root.self] = true
             keys(ownersChosen).forEach(function(n) { names[n] = true })
             if (s.machine) delete names[s.machine.name]
