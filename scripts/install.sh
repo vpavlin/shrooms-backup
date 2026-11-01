@@ -145,7 +145,7 @@ echo "==> shrooms-backup"
 if [ -n "$BINARY" ]; then
     install -m 0755 "$BINARY" /usr/local/bin/shrooms-backup
 else
-    RUNTIME=$(command -v docker || command -v podman || true)
+    RUNTIME=$(command -v podman || command -v docker || true)
     [ -n "$RUNTIME" ] || { echo "  neither docker nor podman, and no --binary"; exit 1; }
     "$RUNTIME" pull -q "$IMAGE" >/dev/null 2>&1 || "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 ||
         { echo "  could not get $IMAGE"; exit 1; }
@@ -165,7 +165,12 @@ else
     t=$(mktemp -d)
     curl -fsSL -o "$t/r.bz2" "https://github.com/restic/restic/releases/download/v$RESTIC_VERSION/restic_${RESTIC_VERSION}_linux_${ARCH}.bz2"
     echo "${RESTIC_SHA[$ARCH]}  $t/r.bz2" | sha256sum -c --quiet || { echo "  restic's checksum does not match"; exit 1; }
-    bunzip2 "$t/r.bz2" && install -m 0755 "$t/r" /usr/local/bin/restic && rm -rf "$t"
+    # Python, not bunzip2: a minimal Fedora (the VPS) has no bzip2, and the
+    # failure went by silently the first time (2026-11-01).
+    python3 -c 'import bz2,sys; open(sys.argv[2],"wb").write(bz2.open(sys.argv[1]).read())' "$t/r.bz2" "$t/r"
+    install -m 0755 "$t/r" /usr/local/bin/restic
+    rm -rf "$t"
+    /usr/local/bin/restic version >/dev/null || { echo "  restic does not run"; exit 1; }
 fi
 
 echo "==> logos-storage"
