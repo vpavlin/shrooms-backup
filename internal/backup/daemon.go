@@ -50,7 +50,9 @@ type Config struct {
 
 // SourceConfig is a source's backup.
 type SourceConfig struct {
-	Paths   []string `json:"paths"`
+	// Presets are named sets of paths (presets.go); Paths are more.
+	Presets []string `json:"presets,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
 	// Times are when it runs, "HH:MM" local time.
 	Times   []string `json:"times"`
@@ -91,8 +93,13 @@ func LoadConfig(path string) (*Config, error) {
 		c.Restic = "restic"
 	}
 	if s := c.Source; s != nil {
-		if len(s.Paths) == 0 || len(s.Mirrors) == 0 {
-			return nil, fmt.Errorf("%s: a source needs paths and mirrors", path)
+		if len(s.Paths)+len(s.Presets) == 0 || len(s.Mirrors) == 0 {
+			return nil, fmt.Errorf("%s: a source needs presets or paths, and mirrors", path)
+		}
+		for _, p := range s.Presets {
+			if _, ok := Presets[p]; !ok {
+				return nil, fmt.Errorf("%s: no preset %q", path, p)
+			}
 		}
 		if len(s.Times) == 0 {
 			s.Times = []string{"03:00", "15:00"}
@@ -270,6 +277,7 @@ func (d *Daemon) Handler(local bool) http.Handler {
 	mux.HandleFunc("GET /v1/mirror/{source}", d.getMirror)
 	mux.HandleFunc("POST /v1/run", d.runNow)
 	mux.HandleFunc("GET /v1/runs", d.getRuns)
+	mux.HandleFunc("GET /v1/presets", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, Presets) })
 	mux.HandleFunc("/v1/repo/{source}/", d.repo)
 	if local && d.self != nil {
 		mux.Handle("/self/", http.StripPrefix("/self", d.self.Handler(false)))
@@ -676,11 +684,15 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 			return err
 		}
 	}
+	paths, exclude := s.Resolve()
+	if len(paths) == 0 {
+		return errors.New("none of this source's paths exist here")
+	}
 	args := []string{"backup", "--no-scan", "--host", d.Mesh.Self()}
-	for _, e := range s.Exclude {
+	for _, e := range exclude {
 		args = append(args, "--exclude", e)
 	}
-	out, err := d.restic(ctx, append(args, s.Paths...)...)
+	out, err := d.restic(ctx, append(args, paths...)...)
 	// restic exits 3 when some files could not be read, having saved the rest.
 	if err != nil && !strings.Contains(out, "snapshot") {
 		return err

@@ -4,6 +4,7 @@
 //	shrooms-backup status                 this machine: its role, last run, what it mirrors
 //	shrooms-backup now                    back up now
 //	shrooms-backup key                    set this source's key from stdin (until the card sets it)
+//	shrooms-backup plan [--preset NAME…]  what this machine would back up, with sizes
 //	shrooms-backup restore --from MIRROR [--source NAME] [--snapshot latest] --target DIR
 //
 // It runs its own Logos Storage node on the backups' mesh, serves its API
@@ -52,6 +53,8 @@ func main() {
 		err = setKey(os.Args[2:])
 	case "restore":
 		err = restore(os.Args[2:])
+	case "plan":
+		err = plan(os.Args[2:])
 	default:
 		usage()
 	}
@@ -62,7 +65,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: shrooms-backup daemon | status | now | key | restore --from MIRROR [--source NAME] [--snapshot ID] --target DIR")
+	fmt.Fprintln(os.Stderr, "usage: shrooms-backup daemon | status | now | key | plan [--preset NAME…] | restore --from MIRROR [--source NAME] [--snapshot ID] --target DIR")
 	os.Exit(2)
 }
 
@@ -266,4 +269,70 @@ func restore(args []string) error {
 		"RESTIC_PASSWORD_FILE="+*key)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+type list []string
+
+func (l *list) String() string     { return strings.Join(*l, ",") }
+func (l *list) Set(v string) error { *l = append(*l, v); return nil }
+
+// plan says what a source would back up here: the presets (from the config,
+// or given), resolved on this machine, with sizes after the excludes.
+func plan(args []string) error {
+	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+	cfgPath := fs.String("config", "/etc/shrooms-backup/config.json", "the config")
+	var presets list
+	fs.Var(&presets, "preset", "a preset (repeat); default: the config's")
+	fs.Parse(args)
+	src := &backup.SourceConfig{Presets: presets}
+	if len(presets) == 0 {
+		cfg, err := backup.LoadConfig(*cfgPath)
+		if err != nil {
+			return err
+		}
+		if cfg.Source == nil {
+			return fmt.Errorf("no source in %s; give --preset", *cfgPath)
+		}
+		src = cfg.Source
+	}
+	for _, p := range src.Presets {
+		if _, ok := backup.Presets[p]; !ok {
+			return fmt.Errorf("no preset %q", p)
+		}
+	}
+	paths, exclude := src.Resolve()
+	var total int64
+	for _, p := range paths {
+		if os.Getenv("PLAN_DEBUG") != "" {
+			fmt.Fprintln(os.Stderr, "walking", p)
+		}
+		n := sizeOf(p, exclude)
+		total += n
+		fmt.Printf("%10s  %s\n", size(n), p)
+	}
+	fmt.Printf("%10s  in all (%d paths; restic compresses and keeps each chunk once)\n", size(total), len(paths))
+	return nil
+}
+
+// sizeOf is a path's size without what the excludes leave out.
+func sizeOf(root string, exclude []string) int64 {
+	var n int64
+	filepath.Walk(root, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		for _, e := range exclude {
+			if backup.Excluded(e, p) {
+				if fi.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if fi.Mode().IsRegular() {
+			n += fi.Size()
+		}
+		return nil
+	})
+	return n
 }

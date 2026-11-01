@@ -44,6 +44,7 @@ usage() {
 Options:
   --mirror            keep copies for other machines
   --always-on         say this machine is always on (a server, not a laptop)
+  --preset NAME       back up a preset: shrooms, agents, agent-history, foray, keys, services (repeat)
   --source PATH       back up PATH (repeat for more)
   --exclude PATTERN   leave out what matches (repeat)
   --mirrors A,B       the machines that keep this source's copies
@@ -61,11 +62,12 @@ EOF
 
 MIRROR=false ALWAYS=false KEEP_LOCAL=false UNINSTALL=0 MESH="" QUOTA="" TIMES="03:00,15:00"
 BINARY="" STORAGE_BIN="" MIRRORS="" OWNERS=""
-SOURCES=() EXCLUDES=()
+SOURCES=() EXCLUDES=() PRESETS=()
 while [ $# -gt 0 ]; do
     case $1 in
         --mirror) MIRROR=true; shift ;;
         --always-on) ALWAYS=true; shift ;;
+        --preset) PRESETS+=("$2"); shift 2 ;;
         --source) SOURCES+=("$2"); shift 2 ;;
         --exclude) EXCLUDES+=("$2"); shift 2 ;;
         --mirrors) MIRRORS=$2; shift 2 ;;
@@ -133,8 +135,9 @@ ms=[m["label"] for m in json.load(sys.stdin).get("meshes") or [] if m.get("overl
 print(ms[0] if ms else "")')
 ADDR=$(mesh_addr "$MESH")
 [ -n "$ADDR" ] || { echo "  not on mesh \"$MESH\""; exit 1; }
-[ ${#SOURCES[@]} -gt 0 ] || [ "$MIRROR" = true ] || { echo "  nothing to do: --mirror, or --source with --mirrors"; usage 2; }
-[ ${#SOURCES[@]} -eq 0 ] || [ -n "$MIRRORS" ] || { echo "  a source needs --mirrors"; exit 2; }
+NSRC=$(( ${#SOURCES[@]} + ${#PRESETS[@]} ))
+[ $NSRC -gt 0 ] || [ "$MIRROR" = true ] || { echo "  nothing to do: --mirror, or --preset/--source with --mirrors"; usage 2; }
+[ $NSRC -eq 0 ] || [ -n "$MIRRORS" ] || { echo "  a source needs --mirrors"; exit 2; }
 ARCH=$(uname -m); case $ARCH in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
 echo "  on mesh $MESH at $ADDR ($ARCH)"
 
@@ -184,18 +187,19 @@ echo "==> the config"
 install -d -m 0700 /etc/shrooms-backup
 [ -n "$QUOTA" ] || QUOTA=$([ "$MIRROR" = true ] && echo 200 || echo 50)
 python3 - "$MESH" "$MIRROR" "$ALWAYS" "$OWNERS" "$QUOTA" "$MIRRORS" "$TIMES" "$KEEP_LOCAL" \
-    "$(printf '%s\n' "${SOURCES[@]+"${SOURCES[@]}"}")" "$(printf '%s\n' "${EXCLUDES[@]+"${EXCLUDES[@]}"}")" <<'PY'
+    "$(printf '%s\n' "${SOURCES[@]+"${SOURCES[@]}"}")" "$(printf '%s\n' "${EXCLUDES[@]+"${EXCLUDES[@]}"}")" \
+    "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" <<'PY'
 import json, sys
-mesh, mirror, always, owners, quota, mirrors, times, keep, sources, excludes = sys.argv[1:]
+mesh, mirror, always, owners, quota, mirrors, times, keep, sources, excludes, presets = sys.argv[1:]
 lst = lambda s, sep=",": [x.strip() for x in s.split(sep) if x.strip()]
 c = {"mesh": mesh, "mirror": mirror == "true", "always_on": always == "true",
      "owners": lst(owners), "node": {"quota_gb": int(quota)}, "restic": "/usr/local/bin/restic"}
-if lst(sources, "\n"):
-    c["source"] = {"paths": lst(sources, "\n"), "exclude": lst(excludes, "\n"), "mirrors": lst(mirrors),
+if lst(sources, "\n") or lst(presets, "\n"):
+    c["source"] = {"presets": lst(presets, "\n"), "paths": lst(sources, "\n"), "exclude": lst(excludes, "\n"), "mirrors": lst(mirrors),
                    "times": lst(times), "keep_local": keep == "true"}
 json.dump(c, open("/etc/shrooms-backup/config.json", "w"), indent=2)
 print("  " + ", ".join(filter(None, ["a mirror" if c["mirror"] else "",
-      ("a source of " + " ".join(c["source"]["paths"]) + " to " + ", ".join(c["source"]["mirrors"])) if "source" in c else ""])))
+      ("a source of " + " ".join(c["source"]["presets"] + c["source"]["paths"]) + " to " + ", ".join(c["source"]["mirrors"])) if "source" in c else ""])))
 PY
 chmod 600 /etc/shrooms-backup/config.json
 
@@ -226,7 +230,7 @@ systemctl enable shrooms-backup >/dev/null 2>&1
 systemctl restart shrooms-backup
 for _ in $(seq 30); do shrooms-backup status >/dev/null 2>&1 && break; sleep 2; done
 shrooms-backup status | sed 's/^/  /' || { echo "  not answering yet: journalctl -u shrooms-backup"; exit 1; }
-if [ ${#SOURCES[@]} -gt 0 ] && [ ! -s /etc/shrooms-backup/key ]; then
+if [ $NSRC -gt 0 ] && [ ! -s /etc/shrooms-backup/key ]; then
     echo
     echo "  This source has no key yet, so it cannot back up. Set it from the owner's Keycard"
     echo "  (the Shrooms Backup app), or for now: sudo shrooms-backup key"
