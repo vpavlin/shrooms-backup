@@ -16,7 +16,7 @@ export interface Held { source: string; adopted: number; pending: number; missin
 export interface Info {
   name: string; mirror: boolean; always_on: boolean; quota: number; used: number; quota_gb?: number;
   owners?: string[]; source?: Source | null; last_run?: Run | null; running?: boolean; next?: string;
-  holds?: string[]; held?: Held[]; owner?: boolean;
+  holds?: string[]; held?: Held[]; owner?: boolean; disk?: { free: number; total: number };
 }
 export interface Machine { name: string; base: string; info: Info }
 export interface Peer { name: string; mesh: string; overlay: string; overlay_v4?: string; online: boolean }
@@ -140,9 +140,19 @@ export function mirrorLine(source: Machine, mirror: string, ms: Machine[]): { te
   const c = copiesOf(source.info.name, ms).find((x) => x.mirror === mirror);
   if (c) return { text: copyText(c.status) + (c.alwaysOn ? "" : ", not always on"), tone: copyTone(c.status) };
   const said = source.info.last_run?.mirrors?.[mirror] || "";
-  if (said === "ok") return { text: "had the last run (not reachable from here now)", tone: "ok" };
+  const answered = ms.some((m) => m.info.name === mirror);
+  if (said === "ok") return { text: answered ? "had the last run" : "had the last run (not reachable from here now)", tone: "ok" };
   if (said) return { text: said, tone: "bad" };
+  // A mirror that answered but holds nothing of this source has simply not had a run yet.
+  if (answered) return { text: "no copy yet", tone: "warn" };
   return { text: "not reachable from here", tone: "none" };
+}
+
+/** A mirror's storage: its limit's use, and the disk it is on. */
+export function storageText(i: Info): string {
+  let t = `${size(i.used)} of ${size(i.quota)} used`;
+  if (i.disk) t += ` · its disk: ${size(i.disk.free)} free of ${size(i.disk.total)}`;
+  return t;
 }
 
 export function sourceLine(i: Info, now = Date.now()): string {
@@ -168,7 +178,7 @@ export function formOf(i: Info): Form {
     isSource: !!s, presets: [...(s?.presets || [])], paths: (s?.paths || []).join("\n"), exclude: (s?.exclude || []).join("\n"),
     times: (s?.times || ["03:00", "15:00"]).join(", "), keepDaily: String(s?.keep_daily || 14), keepWeekly: String(s?.keep_weekly || 12),
     mirrors: [...(s?.mirrors || [])], keepLocal: !!s?.keep_local,
-    mirror: !!i.mirror, quotaGb: String(i.quota_gb || 50), alwaysOn: !!i.always_on, owners: [...(i.owners || [])],
+    mirror: !!i.mirror, quotaGb: String(i.quota_gb || 10), alwaysOn: !!i.always_on, owners: [...(i.owners || [])],
   };
 }
 
@@ -177,7 +187,7 @@ const lines = (t: string) => t.split("\n").map((x) => x.trim()).filter((x) => x 
 /** What PUT /v1/config takes; the daemon checks it again and says what is wrong. */
 export function settingsOf(f: Form): Settings {
   return {
-    owners: [...f.owners].sort(), always_on: f.alwaysOn, mirror: f.mirror, quota_gb: parseInt(f.quotaGb) || 50,
+    owners: [...f.owners].sort(), always_on: f.alwaysOn, mirror: f.mirror, quota_gb: parseInt(f.quotaGb) || 10,
     source: !f.isSource ? null : {
       presets: [...f.presets].sort(), paths: lines(f.paths), exclude: lines(f.exclude),
       times: f.times.split(/[ ,]+/).filter((x) => x !== ""), mirrors: [...f.mirrors].sort(), keep_local: f.keepLocal,

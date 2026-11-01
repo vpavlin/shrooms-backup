@@ -13,7 +13,7 @@ import { findMachines } from "./src/find";
 import { store } from "./src/store";
 import {
   bars, duration, formOf, formProblem, mergeKnown, mirrorChoices, mirrorLine, ownerChoices, parseLink, roleOf,
-  runText, seconds, settingsOf, size, sourceLine, stateOf, toggled, when, whatOf,
+  runText, seconds, settingsOf, size, sourceLine, storageText, stateOf, toggled, when, whatOf,
   type Form, type Machine, type Peer, type Run, type Tone,
 } from "./src/model";
 
@@ -222,7 +222,7 @@ function Overview({ machines, stale, loading, onRefresh, onOpen, onRun }: {
               <Text style={s.small}>  {i.always_on ? "always on" : "not always on"}{stale.includes(i.name) ? " · as last seen" : ""}</Text>
             </View>
             <View style={s.meter}><View style={[s.meterFill, { width: `${frac * 100}%`, backgroundColor: frac > 0.85 ? C.amber : C.violet }]} /></View>
-            <Text style={s.small}>{size(i.used)} of {size(i.quota)} used</Text>
+            <Text style={s.small}>{storageText(i)}</Text>
             {(i.held || []).map((h) => (
               <View key={h.source} style={[s.row, { marginTop: 4 }]}>
                 <Dot tone={h.error ? "bad" : h.pending > h.adopted ? "warn" : "ok"} />
@@ -352,7 +352,7 @@ function SettingsScreen({ machine, machines, peers, onSaved, onError }: {
   useEffect(() => { api.presets(machine.base).then(setPresets).catch(() => {}); }, [machine.base]);
 
   const problem = formProblem(f);
-  const restarts = f.mirror !== i.mirror || f.isSource !== !!i.source || (f.mirror && parseInt(f.quotaGb) !== (i.quota_gb || 50));
+  const restarts = f.mirror !== i.mirror || f.isSource !== !!i.source || (f.mirror && parseInt(f.quotaGb) !== (i.quota_gb || 10));
   const save = () => {
     const go = async () => {
       setSaving(true);
@@ -408,7 +408,8 @@ function SettingsScreen({ machine, machines, peers, onSaved, onError }: {
           </View>
           <Switch value={f.mirror} disabled={ro} onValueChange={(v) => set({ mirror: v })} trackColor={{ true: C.phosphor, false: C.line }} thumbColor={C.bone} />
         </View>
-        {f.mirror && <Field label="Storage, GB (changing it restarts the daemon)" value={f.quotaGb} keyboard="numeric" width={160} disabled={ro} onChange={(v) => set({ quotaGb: v })} />}
+        {f.mirror && <Field label={"The most backups may take here, GB" + (i.disk ? ` (its disk: ${size(i.disk.free)} free of ${size(i.disk.total)})` : "") + "; changing it restarts the daemon"}
+          value={f.quotaGb} keyboard="numeric" disabled={ro} onChange={(v) => set({ quotaGb: v })} />}
         <View style={[s.switchRow, { marginTop: 10 }]}>
           <View style={{ flex: 1 }}>
             <Text style={s.body}>Always on</Text>

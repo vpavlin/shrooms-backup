@@ -96,7 +96,7 @@ func (c *Config) fill() error {
 		c.Node.APIPort = 8591
 	}
 	if c.Node.QuotaGB == 0 {
-		c.Node.QuotaGB = 50
+		c.Node.QuotaGB = DefaultQuotaGB
 	}
 	if c.Node.QuotaGB < 0 {
 		return errors.New("a quota is a number of GB")
@@ -376,19 +376,22 @@ func fail(w http.ResponseWriter, code int, err error) {
 
 // Info is what a daemon says about itself.
 type Info struct {
-	Name     string        `json:"name"`
-	Mirror   bool          `json:"mirror"`
-	AlwaysOn bool          `json:"always_on"`
-	SPR      string        `json:"spr"`
-	Quota    int64         `json:"quota"`
-	Used     int64         `json:"used"`
-	QuotaGB  int64         `json:"quota_gb"`
-	Owners   []string      `json:"owners"`
-	Source   *SourceConfig `json:"source,omitempty"`
-	LastRun  *Run          `json:"last_run,omitempty"`
-	Running  bool          `json:"running"`
-	Next     *time.Time    `json:"next,omitempty"` // the next scheduled run
-	Holds    []string      `json:"holds"`          // sources this machine mirrors
+	Name     string `json:"name"`
+	Mirror   bool   `json:"mirror"`
+	AlwaysOn bool   `json:"always_on"`
+	SPR      string `json:"spr"`
+	Quota    int64  `json:"quota"`
+	Used     int64  `json:"used"`
+	QuotaGB  int64  `json:"quota_gb"`
+	// Disk is the filesystem the store is on, so the apps can say how
+	// much of it a quota would take.
+	Disk    *Disk         `json:"disk,omitempty"`
+	Owners  []string      `json:"owners"`
+	Source  *SourceConfig `json:"source,omitempty"`
+	LastRun *Run          `json:"last_run,omitempty"`
+	Running bool          `json:"running"`
+	Next    *time.Time    `json:"next,omitempty"` // the next scheduled run
+	Holds   []string      `json:"holds"`          // sources this machine mirrors
 	// Held is how far each of those copies is, and its size.
 	Held []MirrorStatus `json:"held"`
 	// Owner: the caller may change the settings and start runs.
@@ -397,6 +400,9 @@ type Info struct {
 
 func (d *Daemon) Info(ctx context.Context) Info {
 	in := Info{Name: d.Mesh.Self(), Holds: []string{}, Held: []MirrorStatus{}}
+	if k, err := diskOf(d.State); err == nil {
+		in.Disk = &k
+	}
 	if st, ok := d.Store.(*Storage); ok {
 		in.SPR, _ = st.SPR(ctx)
 		if sp, err := st.Space(ctx); err == nil {

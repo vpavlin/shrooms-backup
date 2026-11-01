@@ -453,13 +453,14 @@ Item {
                                             spacing: 8
                                             Dot {
                                                 anchors.verticalCenter: parent.verticalCenter
-                                                color: copy ? root.copyColour(copy) : lastSays === "ok" ? root.cPhosphor : lastSays ? root.cRust : root.cAsh
+                                                color: copy ? root.copyColour(copy) : lastSays === "ok" ? root.cPhosphor : lastSays ? root.cRust : root.machineNamed(modelData) ? root.cAmber : root.cAsh
                                             }
                                             Text { text: modelData; color: root.cBone; font.pixelSize: 13; width: 110 }
                                             Dim {
                                                 text: copy ? root.copyText(copy) + (copy.alwaysOn ? "" : ", not always on")
-                                                      : lastSays === "ok" ? "had the last run (not reachable from here now)"
-                                                      : lastSays ? lastSays : "not reachable from here"
+                                                      : lastSays === "ok" ? (root.machineNamed(modelData) ? "had the last run" : "had the last run (not reachable from here now)")
+                                                      : lastSays ? lastSays
+                                                      : root.machineNamed(modelData) ? "no copy yet" : "not reachable from here"
                                             }
                                         }
                                     }
@@ -492,7 +493,7 @@ Item {
                                             color: mir.info.quota > 0 && mir.info.used / mir.info.quota > 0.85 ? root.cAmber : root.cViolet
                                         }
                                     }
-                                    Dim { text: root.size(mir.info.used) + " of " + root.size(mir.info.quota) + " used" }
+                                    Dim { text: root.size(mir.info.used) + " of " + root.size(mir.info.quota) + " used" + (mir.info.disk ? "; its disk: " + root.size(mir.info.disk.free) + " free of " + root.size(mir.info.disk.total) : "") }
                                     Repeater {
                                         model: mir.info.held || []
                                         delegate: Row {
@@ -634,7 +635,7 @@ Item {
             keepLocal.checked = !!(src && src.keep_local)
             mirror.checked = !!info.mirror
             alwaysOn.checked = !!info.always_on
-            quota.text = String(info.quota_gb || 50)
+            quota.text = String(info.quota_gb || 10)
         }
         // Reset when another machine is picked, not on every poll: a poll
         // must not undo what is being typed.
@@ -648,7 +649,7 @@ Item {
 
         function settings() {
             var out = { owners: keys(ownersChosen), always_on: alwaysOn.checked, mirror: mirror.checked,
-                        quota_gb: parseInt(quota.text) || 50, source: null }
+                        quota_gb: parseInt(quota.text) || 10, source: null }
             if (isSource)
                 out.source = { presets: keys(chosen), paths: lines(paths.text), exclude: lines(exclude.text),
                                times: times.text.split(/[ ,]+/).filter(function(x) { return x !== "" }),
@@ -761,9 +762,9 @@ Item {
                 }
                 Row {
                     spacing: 8; visible: mirror.checked
-                    Dim { text: "Storage, GB"; anchors.verticalCenter: parent.verticalCenter }
+                    Dim { text: "The most backups may take here, GB"; anchors.verticalCenter: parent.verticalCenter }
                     Field { id: quota; width: 80; enabled: s.editable; validator: IntValidator { bottom: 1; top: 100000 } }
-                    Dim { text: "(changing it restarts the daemon)"; anchors.verticalCenter: parent.verticalCenter }
+                    Dim { text: (s.info.disk ? "its disk: " + root.size(s.info.disk.free) + " free of " + root.size(s.info.disk.total) + "; " : "") + "changing it restarts the daemon"; anchors.verticalCenter: parent.verticalCenter }
                 }
                 Check {
                     id: alwaysOn; enabled: s.editable

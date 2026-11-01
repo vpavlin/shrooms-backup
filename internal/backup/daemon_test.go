@@ -142,6 +142,8 @@ func TestSettings(t *testing.T) {
 	mesh := &Mesh{}
 	mesh.Set("proteus", map[string]netip.Addr{"phone": netip.MustParseAddr("127.0.0.1")})
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	defer func(f func(string) (Disk, error)) { diskOf = f }(diskOf)
+	diskOf = func(string) (Disk, error) { return Disk{Free: 100 << 30, Total: 200 << 30}, nil }
 	restarted := make(chan bool, 1)
 	cfg := &Config{Mesh: "office", Source: &SourceConfig{Presets: []string{"shrooms"}, Mirrors: []string{"scribe"}}}
 	if err := cfg.fill(); err != nil {
@@ -165,7 +167,7 @@ func TestSettings(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	body := `{"owners":["phone"],"always_on":true,"mirror":false,"quota_gb":50,` +
+	body := `{"owners":["phone"],"always_on":true,"mirror":false,"quota_gb":10,` +
 		`"source":{"presets":["shrooms","keys"],"times":["04:30"],"mirrors":["scribe","vps"]}}`
 	resp, err := http.Get(mesh_.URL + "/v1/peers")
 	if err != nil {
@@ -202,5 +204,39 @@ func TestSettings(t *testing.T) {
 	}
 	if saved, _ := LoadConfig(cfgPath); !saved.Mirror {
 		t.Error("a refused setting overwrote the saved ones")
+	}
+	// 100 GiB free of 200 (107 GB of 215): at most 97 GB, 10 GB kept free.
+	if code := put(local.URL, strings.Replace(body, `"quota_gb":10`, `"quota_gb":98`, 1)); code != 400 {
+		t.Errorf("more than the disk can give: %d", code)
+	}
+}
+
+// A quota is never more than the disk can give, keeping a tenth of it free.
+func TestQuotaFitsTheDisk(t *testing.T) {
+	k := Disk{Free: 30 * GB, Total: 100 * GB}
+	if got := k.MaxQuota(0); got != 20*GB {
+		t.Errorf("30 GB free of 100: at most %d GB, want 20", got/GB)
+	}
+	if got := k.MaxQuota(5 * GB); got != 25*GB {
+		t.Errorf("what the node holds counts as its own: %d GB", got/GB)
+	}
+	if got := (Disk{Free: 1 * GB, Total: 100 * GB}).MaxQuota(0); got != 0 {
+		t.Errorf("a nearly full disk: %d", got)
+	}
+	// jimmy-crib on 2026-11-01: a tenth of a big disk is more than it had free.
+	if got := (Disk{Free: 21 * GB, Total: 233 * GB}).MaxQuota(0); got != 11*GB {
+		t.Errorf("21 GB free of 233: %d GB, want 11", got/GB)
+	}
+	dir := t.TempDir()
+	if q, why := AllowedQuota(dir, 1<<20, 0); q >= 1<<50 || why == "" {
+		t.Errorf("a million GB was allowed: %d %q", q, why)
+	}
+	defer func(f func(string) (Disk, error)) { diskOf = f }(diskOf)
+	diskOf = func(string) (Disk, error) { return Disk{Free: 1 * GB, Total: 100 * GB}, nil }
+	if q, why := AllowedQuota(dir, 10, 0); q != MinQuota || why == "" {
+		t.Errorf("a full disk: %d %q, want the floor", q, why)
+	}
+	if checkQuota(dir, 1<<20, 0) == nil {
+		t.Error("a million GB passed the settings check")
 	}
 }

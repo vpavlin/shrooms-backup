@@ -117,8 +117,12 @@ func daemon(args []string) error {
 		}
 	}()
 
+	quota, lowered := backup.AllowedQuota(*state, cfg.Node.QuotaGB, dirSize(filepath.Join(*state, "node")))
+	if lowered != "" {
+		log.Warn(lowered)
+	}
 	node := backup.NewNode(backup.NodeConfig{Bin: cfg.Node.Bin, DataDir: filepath.Join(*state, "node"), IP: ip,
-		Port: cfg.Node.Port, APIPort: cfg.Node.APIPort, Quota: cfg.Node.QuotaGB << 30}, log)
+		Port: cfg.Node.Port, APIPort: cfg.Node.APIPort, Quota: quota}, log)
 	cache, err := backup.NewCache(filepath.Join(*state, "cache"), *cacheMB<<20)
 	if err != nil {
 		return err
@@ -333,6 +337,21 @@ func sizeOf(root string, exclude []string) int64 {
 		}
 		if fi.Mode().IsRegular() {
 			n += fi.Size()
+		}
+		return nil
+	})
+	return n
+}
+
+// dirSize is what the node's store already takes: it counts as room a
+// quota may keep, since it is the backups' already.
+func dirSize(root string) int64 {
+	var n int64
+	filepath.WalkDir(root, func(_ string, e os.DirEntry, err error) error {
+		if err == nil && !e.IsDir() {
+			if fi, err := e.Info(); err == nil {
+				n += fi.Size()
+			}
 		}
 		return nil
 	})

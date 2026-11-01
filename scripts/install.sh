@@ -52,7 +52,7 @@ Options:
   --keep-local        keep this source's backup in its own node too
   --owners A,B        devices that may restore any backup here and start runs
   --mesh LABEL        the mesh to run on (default: this machine's first)
-  --quota-gb N        the node's storage quota (default 50; 200 with --mirror)
+  --quota-gb N        the most backups may take on this disk, in GB (default 10)
   --binary FILE       use this shrooms-backup instead of the image's
   --storage-bin FILE  use this logos-storage instead of the pinned build
   --uninstall         stop and remove it (the backups on mirrors stay)
@@ -190,7 +190,7 @@ fi
 
 echo "==> the config"
 install -d -m 0700 /etc/shrooms-backup
-[ -n "$QUOTA" ] || QUOTA=$([ "$MIRROR" = true ] && echo 200 || echo 50)
+[ -n "$QUOTA" ] || QUOTA=10
 python3 - "$MESH" "$MIRROR" "$ALWAYS" "$OWNERS" "$QUOTA" "$MIRRORS" "$TIMES" "$KEEP_LOCAL" \
     "$(printf '%s\n' "${SOURCES[@]+"${SOURCES[@]}"}")" "$(printf '%s\n' "${EXCLUDES[@]+"${EXCLUDES[@]}"}")" \
     "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" <<'PY'

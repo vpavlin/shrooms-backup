@@ -50,6 +50,18 @@ func (d *Daemon) putConfig(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
+	if next.Mirror || next.Node.QuotaGB != d.Cfg.Node.QuotaGB {
+		var held int64
+		if st, ok := d.Store.(*Storage); ok {
+			if sp, err := st.Space(r.Context()); err == nil {
+				held = sp.QuotaUsed
+			}
+		}
+		if err := checkQuota(d.State, next.Node.QuotaGB, held); err != nil {
+			fail(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	if err := saveConfig(d.ConfigPath, &next); err != nil {
 		fail(w, http.StatusInternalServerError, err)
 		return

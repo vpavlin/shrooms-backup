@@ -65,6 +65,10 @@ t("where a source's copies are", () => {
   assert.deepEqual(m.mirrorLine(src, "vps", ms), { text: "fetching, 3 objects to go, not always on", tone: "warn" });
   assert.deepEqual(m.mirrorLine(src, "scribe", ms), { text: "had the last run (not reachable from here now)", tone: "ok" });
   assert.equal(m.mirrorLine(mach("x", { last_run: null }), "y", ms).tone, "none");
+  // Found, but holding nothing of this source: not "unreachable".
+  assert.deepEqual(m.mirrorLine(mach("proteus", { source: { mirrors: ["vps"] }, last_run: { started: iso(1), finished: iso(1), ok: false, error: "no key" } }), "vps", ms),
+    { text: "no copy yet", tone: "warn" });
+  assert.equal(m.storageText(info("p", { used: 41e6, quota: 10e9, disk: { free: 80e9, total: 500e9 } })), "41 MB of 10 GB used · its disk: 80 GB free of 500 GB");
 });
 
 t("a source's state", () => {
