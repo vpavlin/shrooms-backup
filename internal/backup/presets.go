@@ -28,8 +28,9 @@ var Presets = map[string]Preset{
 	"shrooms": {
 		About: "the mesh identity and the daemon's state",
 		Paths: []string{"/etc/shrooms", "/var/lib/shrooms", "/etc/systemd/system/shrooms*.service", "/etc/systemd/system/shrooms*.service.d"},
-		// The delivery node's own store rebuilds itself (76 MB on jimmy-crib).
-		Exclude: []string{"/var/lib/shrooms/core", "*.tmp"},
+		// Core dumps are no state (316 MB on pi5 on 2026-11-01, the daemon
+		// crashing as the machine rebooted).
+		Exclude: []string{"/var/lib/shrooms/core", "/var/lib/shrooms/core.*", "*.tmp"},
 	},
 	"agents": {
 		About: "Shrooms Agents: sessions, settings, schedules, the model keys",
@@ -39,9 +40,10 @@ var Presets = map[string]Preset{
 		// ADR-078); conversations are in agent-history.
 		// and the event logs (the conversations as the apps show them:
 		// 385 MB on jimmy-crib) are in agent-history; pi's bin and npm
-		// reinstall themselves.
+		// reinstall themselves, and so does its package cache (git: 202 MB
+		// on pi5).
 		Exclude: []string{"shrooms-agent/uploads", "shrooms-agent/archive", "shrooms-agent/events",
-			".pi/agent/sessions", ".pi/agent/bin", ".pi/agent/npm"},
+			".pi/agent/sessions", ".pi/agent/bin", ".pi/agent/npm", ".pi/agent/git"},
 	},
 	"agent-history": {
 		About: "the agents' conversations (larger: hundreds of MB a machine)",
