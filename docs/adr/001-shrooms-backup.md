@@ -196,3 +196,36 @@ fits (the disk filled with other things) starts with what fits and logs it,
 but never below 1 GB, which a source needs to stage a run. A plain tenth
 left jimmy-crib (20 GB free of 233) nothing, and its runs would have failed.
 `/v1/info` carries the disk's free and total space, so the apps show both.
+
+## Keys from the Keycard, set over the mesh (2026-11-02)
+
+**One card, a key per machine.** `shrooms-backup key --keycard --machine
+NAME` derives the machine's key with the card's EXPORT BIP85 at
+m/83696968'/128169'/32'/INDEX' (BIP85's HEX application, 32 bytes), the
+index being the first 31 bits of SHA-256("shrooms-backup " + NAME), and
+hands it to that machine's daemon over the mesh (`PUT /v1/key`, owners
+only). Nothing to write down beyond the card's recovery phrase; a machine
+reinstalled under its name gets its key back from the card. The path is
+pinned by a test: changing it would leave every backup unopenable from the
+card.
+
+**The card goes where a reader or NFC is**, the laptop or the phone, never
+into the machine being backed up (old machines have no USB-C, and it would
+be odd anyway). Shrooms Backup pairs with the card itself, in a slot of its
+own, and keeps the pairing in `~/.config/shrooms-backup`; the reader code is
+copied from Shrooms, not imported, and only a cgo build reaches a reader:
+the daemon's build stays cgo-free. Václav, on putting the command into the
+`shrooms` CLI first: "we should keep the CLI separate".
+
+**Changing a key keeps every backup.** restic's keys each unlock the same
+master key, so a new key is added beside the old one (`restic key add`),
+checked against the repository, and used from then on. A key is never
+removed through the API, so a lost owner device cannot lock a machine out of
+its backups; removing the old one is done on the machine. This does not
+re-encrypt anything: somebody holding an old key and an old copy of its key
+file (a mirror keeps deleted files 30 days) can still read the data. A
+leaked key that matters is answered by a new repository and `restic copy`.
+
+`shrooms-backup key` from stdin no longer echoes, asks twice, and never
+writes over an existing key (it showed the passphrase as it was pasted,
+2026-11-02).

@@ -3,7 +3,8 @@
 //	shrooms-backup daemon                 run it (as root: a source may back up /etc)
 //	shrooms-backup status                 this machine: its role, last run, what it mirrors
 //	shrooms-backup now                    back up now
-//	shrooms-backup key                    set this source's key from stdin (until the card sets it)
+//	shrooms-backup key                    set this source's key from stdin
+//	shrooms-backup key --keycard [--machine NAME]   derive a machine's key from the card here and hand it over
 //	shrooms-backup plan [--preset NAME…]  what this machine would back up, with sizes
 //	shrooms-backup restore --from MIRROR [--source NAME] [--snapshot latest] --target DIR
 //
@@ -15,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -33,6 +35,7 @@ import (
 	"time"
 
 	"github.com/vpavlin/shrooms-backup/internal/backup"
+	"github.com/vpavlin/shrooms-backup/internal/card"
 	"golang.org/x/term"
 )
 
@@ -229,7 +232,16 @@ func now() error {
 func setKey(args []string) error {
 	fs := flag.NewFlagSet("key", flag.ExitOnError)
 	key := fs.String("key", "/etc/shrooms-backup/key", "where it goes")
+	useCard := fs.Bool("keycard", false, "derive the key from the Keycard on this machine's reader and hand it to --machine over the mesh")
+	machine := fs.String("machine", "", "with --keycard: whose key (its mesh name; default this machine)")
+	to := fs.String("to", "", "with --keycard: its backup daemon's address (default: found through the shrooms daemon)")
+	check := fs.Bool("check", false, "with --keycard: derive it and print its fingerprint, send nothing")
+	reader := fs.String("reader", "", "with --keycard: which reader, when several are attached")
+	sock := fs.String("socket", "/run/shrooms/shrooms.sock", "the shrooms daemon's control socket")
 	fs.Parse(args)
+	if *useCard {
+		return keyFromCard(*machine, *to, *reader, *sock, *check)
+	}
 	// Never over a key: the repository is encrypted with it, and a new one
 	// would leave this machine unable to read its own backups.
 	if _, err := os.Stat(*key); err == nil {
@@ -384,4 +396,89 @@ func dirSize(root string) int64 {
 		return nil
 	})
 	return n
+}
+
+// keyFromCard derives a machine's key from the Keycard on this machine's
+// reader and hands it to that machine's daemon (PUT /v1/key), which keeps it
+// or adds it beside the key it had. The card goes into whatever has a
+// reader, never into the machine being backed up; the key is never printed.
+func keyFromCard(machine, to, reader, sock string, check bool) error {
+	mesh := &backup.Mesh{Socket: sock}
+	meshErr := mesh.Refresh(context.Background())
+	if machine == "" {
+		if machine = mesh.Self(); machine == "" {
+			return fmt.Errorf("--machine NAME: whose key (the shrooms daemon did not say who this is: %v)", meshErr)
+		}
+	}
+	url := ""
+	switch {
+	case check:
+	case to != "":
+		url = "http://" + net.JoinHostPort(strings.Trim(to, "[]"), strconv.Itoa(backup.Port))
+	case machine == mesh.Self():
+		url = local
+	default:
+		a, ok := mesh.Find(machine, "")
+		if !ok {
+			return fmt.Errorf("%s is not on this machine's meshes (%v); give --to ADDRESS", machine, meshErr)
+		}
+		url = "http://" + net.JoinHostPort(a.String(), strconv.Itoa(backup.Port))
+	}
+	t, done, err := card.OpenReader(reader)
+	if err != nil {
+		return err
+	}
+	defer done()
+	pin, err := readHidden("Card PIN: ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(os.Getenv("HOME"), ".config", "shrooms-backup")
+	k, err := card.Key(t, dir, strings.TrimSpace(pin), machine, func() (string, error) {
+		return readHidden("This device has not met the card: its pairing password: ")
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s's backup key: fingerprint %s\n", machine, card.Fingerprint(k))
+	if check {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]string{"key": k})
+	req, _ := http.NewRequest("PUT", url+"/v1/key", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
+	if err != nil {
+		return fmt.Errorf("%s's backup daemon: %w", machine, err)
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Key   string `json:"key"`
+		Error string `json:"error"`
+	}
+	json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&r)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s refused it: %s", machine, r.Error)
+	}
+	switch r.Key {
+	case "set":
+		fmt.Printf("%s has it: its backups are encrypted with it from now on\n", machine)
+	case "added":
+		fmt.Printf("%s added it beside its old key: every backup opens with either, and it uses this one from now on\n", machine)
+	case "same":
+		fmt.Printf("%s had it already\n", machine)
+	}
+	return nil
+}
+
+func readHidden(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		l, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		fmt.Fprintln(os.Stderr)
+		return strings.TrimSpace(l), err
+	}
+	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	return string(b), err
 }
