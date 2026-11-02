@@ -3,14 +3,14 @@
     "name": "Shrooms Backup",
     "slug": "shrooms-backup",
     "scheme": "shroomsbackup",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "platforms": ["android"],
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#07090B",
     "android": {
       "package": "xyz.vpavlin.shrooms.backup",
-      "versionCode": 2,
+      "versionCode": 3,
       "adaptiveIcon": { "foregroundImage": "./assets/adaptive-icon.png", "backgroundColor": "#07090B" },
       "permissions": [],
       "softwareKeyboardLayoutMode": "resize"
