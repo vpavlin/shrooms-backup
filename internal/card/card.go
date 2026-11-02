@@ -6,15 +6,21 @@
 // phone), never into the machine being backed up; the key reaches that
 // machine over the mesh.
 //
-// The derivation is BIP85 (the card's EXPORT BIP85): entropy from the card's
-// seed at a path, while the seed never leaves the card. The path is BIP85's
-// HEX application, 32 bytes, at an index fixed by the machine's name:
-// m/83696968'/128169'/32'/INDEX', the index being the first 31 bits of
-// SHA-256("shrooms-backup " + name). No table anywhere, and a machine
-// reinstalled under its name gets its key back.
+// The derivation: the card exports the private key at an EIP-1581 path, the
+// one branch a Keycard lets out ("for encryption"), m/43'/60'/1581'/1'/INDEX',
+// the index being the first 31 bits of SHA-256("shrooms-backup " + name); the
+// key is HKDF-SHA256 of it, labelled with the machine. The card's seed never
+// leaves it. No table anywhere, and a machine reinstalled under its name gets
+// its key back.
+//
+// Not BIP85, which was the plan (shrooms ADR-052): Václav's card runs applet
+// 3.1, which has no EXPORT BIP85 (it answered with no data at all). The
+// EIP-1581 export works on every applet, so one scheme serves every card,
+// and an old card and a new one with the same seed give the same keys.
 package card
 
 import (
+	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -39,7 +45,16 @@ type Transport interface {
 // every machine's backups unopenable from the card (test pins it).
 func Path(machine string) string {
 	h := sha256.Sum256([]byte("shrooms-backup " + strings.TrimSpace(machine)))
-	return fmt.Sprintf("m/83696968'/128169'/32'/%d'", binary.BigEndian.Uint32(h[:4])&0x7fffffff)
+	return fmt.Sprintf("m/43'/60'/1581'/1'/%d'", binary.BigEndian.Uint32(h[:4])&0x7fffffff)
+}
+
+// derive turns the exported private key into the machine's backup key.
+func derive(priv []byte, machine string) (string, error) {
+	k, err := hkdf.Key(sha256.New, priv, []byte("shrooms-backup"), "shrooms-backup key v1 "+strings.TrimSpace(machine), 32)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(k), nil
 }
 
 // Fingerprint names a key without showing it.
@@ -98,14 +113,14 @@ func Key(t Transport, dir, pin, machine string, pair func() (string, error)) (st
 	if err := cs.VerifyPIN(pin); err != nil {
 		return "", fmt.Errorf("the PIN was refused (the card locks after three): %w", err)
 	}
-	b, err := cs.ExportBIP85(Path(machine), 32)
+	priv, _, err := cs.ExportKey(true, false, false, Path(machine))
 	if err != nil {
-		return "", fmt.Errorf("the card would not derive a backup key (EXPORT BIP85; its applet may predate BIP85): %w", err)
+		return "", fmt.Errorf("the card would not export the key at %s: %w", Path(machine), err)
 	}
-	if len(b) != 32 {
-		return "", fmt.Errorf("the card returned %d bytes for a 32-byte key", len(b))
+	if len(priv) != 32 {
+		return "", fmt.Errorf("the card returned a %d-byte private key, not 32", len(priv))
 	}
-	return hex.EncodeToString(b), nil
+	return derive(priv, machine)
 }
 
 // needsPassword: applets before 4.0 pair with a password; from 4.0 on with

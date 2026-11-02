@@ -200,13 +200,16 @@ left jimmy-crib (20 GB free of 233) nothing, and its runs would have failed.
 ## Keys from the Keycard, set over the mesh (2026-11-02)
 
 **One card, a key per machine.** `shrooms-backup key --keycard --machine
-NAME` derives the machine's key with the card's EXPORT BIP85 at
-m/83696968'/128169'/32'/INDEX' (BIP85's HEX application, 32 bytes), the
-index being the first 31 bits of SHA-256("shrooms-backup " + NAME), and
-hands it to that machine's daemon over the mesh (`PUT /v1/key`, owners
-only). Nothing to write down beyond the card's recovery phrase; a machine
-reinstalled under its name gets its key back from the card. The path is
-pinned by a test: changing it would leave every backup unopenable from the
+NAME` has the card export the private key at the EIP-1581 path
+m/43'/60'/1581'/1'/INDEX' (the one branch a Keycard lets out, "for
+encryption"), the index being the first 31 bits of SHA-256("shrooms-backup "
++ NAME); the machine's key is HKDF-SHA256 of it, labelled with the machine.
+It is handed to that machine's daemon over the mesh (`PUT /v1/key`, owners
+only). Not BIP85, as ADR-052 planned: Václav's card runs applet 3.1, which has
+no EXPORT BIP85 (it answered with no data). The EIP-1581 export works on every
+applet, so one scheme serves every card, old or new, with the same seed. Nothing to write down beyond the card's recovery phrase; a machine
+reinstalled under its name gets its key back from the card. The path and the
+derivation are pinned by tests: changing it would leave every backup unopenable from the
 card.
 
 **The card goes where a reader or NFC is**, the laptop or the phone, never
