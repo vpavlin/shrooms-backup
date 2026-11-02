@@ -93,9 +93,10 @@ func TestASourceAndItsMirror(t *testing.T) {
 
 	// The source restores its backup from the mirror's copy.
 	to := t.TempDir()
+	password := "test"
 	run2 := func(repo string, args ...string) (string, error) {
 		cmd := osexec.Command(bin, args...)
-		cmd.Env = append(os.Environ(), "RESTIC_REPOSITORY=rest:"+repo, "RESTIC_PASSWORD=test", "RESTIC_CACHE_DIR="+t.TempDir())
+		cmd.Env = append(os.Environ(), "RESTIC_REPOSITORY=rest:"+repo, "RESTIC_PASSWORD="+password, "RESTIC_CACHE_DIR="+t.TempDir())
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
@@ -112,6 +113,40 @@ func TestASourceAndItsMirror(t *testing.T) {
 			t.Errorf("%s differs", k)
 		}
 	}
+
+	// A new key from an owner (the card, through the phone): added beside the
+	// old one, so every backup stays readable with either; the daemon backs
+	// up with the new one from then on.
+	putKey := func(k string) (int, string) {
+		req, _ := http.NewRequest("PUT", lSrv.URL+"/v1/key", strings.NewReader(`{"key":"`+k+`"}`))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, b := putKey("from-the-card-0123456789abcdef"); code != 200 || !strings.Contains(b, `"added"`) {
+		t.Fatalf("new key: %d %s", code, b)
+	}
+	if code, b := putKey("from-the-card-0123456789abcdef"); code != 200 || !strings.Contains(b, `"same"`) {
+		t.Errorf("the same key again: %d %s", code, b)
+	}
+	if code, _ := putKey("short"); code != 400 {
+		t.Errorf("a short key: %d", code)
+	}
+	os.WriteFile(filepath.Join(data, "fb"), []byte("after the new key"), 0o644)
+	if run := l.RunSource(ctx); !run.OK {
+		t.Fatalf("a run with the new key: %+v", run)
+	}
+	for _, pw := range []string{"from-the-card-0123456789abcdef", "test"} {
+		password = pw
+		if out, err := run2(pSrv.URL+"/v1/repo/laptop/", "cat", "config"); err != nil {
+			t.Errorf("the mirror's copy does not open with %q: %v\n%s", pw, err, out)
+		}
+	}
+	password = "test"
 
 	// Somebody else on the mesh: no.
 	pMesh.Set("proteus", map[string]netip.Addr{"stranger": loopback})

@@ -323,6 +323,7 @@ func (d *Daemon) Handler(local bool) http.Handler {
 	mux.HandleFunc("POST /v1/run", d.runNow)
 	mux.HandleFunc("GET /v1/runs", d.getRuns)
 	mux.HandleFunc("PUT /v1/config", d.putConfig)
+	mux.HandleFunc("PUT /v1/key", d.putKey)
 	// The phone app knows one machine; this is how it finds the others.
 	mux.HandleFunc("GET /v1/peers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"self": d.Mesh.Self(), "peers": d.Mesh.Peers()})
@@ -396,6 +397,8 @@ type Info struct {
 	Held []MirrorStatus `json:"held"`
 	// Owner: the caller may change the settings and start runs.
 	Owner bool `json:"owner"`
+	// Key: a source has its key (without one it cannot back up).
+	Key bool `json:"key"`
 }
 
 func (d *Daemon) Info(ctx context.Context) Info {
@@ -440,6 +443,7 @@ func (d *Daemon) Info(ctx context.Context) Info {
 func (d *Daemon) info(w http.ResponseWriter, r *http.Request) {
 	in := d.Info(r.Context())
 	in.Owner = d.owner(callerOf(r))
+	in.Key = in.Source != nil && d.HasKey()
 	writeJSON(w, 200, in)
 }
 
@@ -745,10 +749,14 @@ func (d *Daemon) RunSource(ctx context.Context) Run {
 }
 
 func (d *Daemon) restic(ctx context.Context, args ...string) (string, error) {
+	return d.resticWith(ctx, d.Key, args...)
+}
+
+func (d *Daemon) resticWith(ctx context.Context, key string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, d.Cfg.Restic, args...)
 	cmd.Env = append(os.Environ(),
 		"RESTIC_REPOSITORY=rest:"+d.localURL()+"/self/",
-		"RESTIC_PASSWORD_FILE="+d.Key,
+		"RESTIC_PASSWORD_FILE="+key,
 		"RESTIC_CACHE_DIR="+filepath.Join(d.State, "restic-cache"))
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
