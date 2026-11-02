@@ -44,7 +44,7 @@ usage() {
 Options:
   --mirror            keep copies for other machines
   --always-on         say this machine is always on (a server, not a laptop)
-  --preset NAME       back up a preset: shrooms, agents, agent-history, foray, keys, services (repeat)
+  --preset NAME[,…]   back up presets: shrooms, agents, agent-history, foray, keys, services (a list, or repeat)
   --source PATH       back up PATH (repeat for more)
   --exclude PATTERN   leave out what matches (repeat)
   --mirrors A,B       the machines that keep this source's copies
@@ -67,7 +67,17 @@ while [ $# -gt 0 ]; do
     case $1 in
         --mirror) MIRROR=true; shift ;;
         --always-on) ALWAYS=true; shift ;;
-        --preset) PRESETS+=("$2"); shift 2 ;;
+        # A list as well as one at a time: "--preset shrooms,agents" was
+        # written into the config as one preset of that name, and the daemon
+        # refused to start (2026-11-02).
+        --preset) IFS=, read -ra _p <<< "$2"
+            for _x in "${_p[@]}"; do
+                case "$_x" in
+                    shrooms|agents|agent-history|foray|keys|services) PRESETS+=("$_x") ;;
+                    *) echo "  no preset \"$_x\": shrooms, agents, agent-history, foray, keys, services"; exit 2 ;;
+                esac
+            done
+            shift 2 ;;
         --source) SOURCES+=("$2"); shift 2 ;;
         --exclude) EXCLUDES+=("$2"); shift 2 ;;
         --mirrors) MIRRORS=$2; shift 2 ;;
