@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/vpavlin/shrooms-backup/internal/backup"
+	"golang.org/x/term"
 )
 
 const local = "http://127.0.0.1:7395"
@@ -229,10 +230,37 @@ func setKey(args []string) error {
 	fs := flag.NewFlagSet("key", flag.ExitOnError)
 	key := fs.String("key", "/etc/shrooms-backup/key", "where it goes")
 	fs.Parse(args)
-	fmt.Fprintln(os.Stderr, "this source's backup password (kept root-only; without it the backups cannot be read):")
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil && line == "" {
-		return err
+	// Never over a key: the repository is encrypted with it, and a new one
+	// would leave this machine unable to read its own backups.
+	if _, err := os.Stat(*key); err == nil {
+		return fmt.Errorf("%s exists already: this machine's backups are encrypted with it, so it is not replaced", *key)
+	}
+	var line string
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		// Not echoed: it was, on 2026-11-02, and the passphrase sat on the
+		// screen and in the terminal's scrollback.
+		fmt.Fprint(os.Stderr, "this machine's backup passphrase (kept root-only; without it the backups cannot be read): ")
+		a, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stderr, "again: ")
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return err
+		}
+		if string(a) != string(b) {
+			return fmt.Errorf("the two do not match")
+		}
+		line = string(a)
+	} else {
+		l, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && l == "" {
+			return err
+		}
+		line = l
 	}
 	line = strings.TrimSpace(line)
 	if len(line) < 16 {
