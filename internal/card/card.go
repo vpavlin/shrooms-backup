@@ -63,6 +63,17 @@ func Fingerprint(key string) string {
 	return hex.EncodeToString(h[:4])
 }
 
+// CardID names the card's seed: the first 8 hex characters of its key UID,
+// the same on every card made from one recovery phrase. Public: it is what
+// the card shows anybody who asks, and it opens nothing.
+func CardID(t Transport) string {
+	cs := kc.NewCommandSet(kio.NewNormalChannel(t))
+	if cs.Select() != nil || cs.ApplicationInfo == nil || len(cs.ApplicationInfo.KeyUID) < 4 {
+		return ""
+	}
+	return hex.EncodeToString(cs.ApplicationInfo.KeyUID[:4])
+}
+
 // Key is a machine's backup key, 64 hex characters. pair is asked for the
 // card's pairing password the first time this device meets the card (an
 // applet from 4.0 on needs none, and is paired with ""); the pairing is kept

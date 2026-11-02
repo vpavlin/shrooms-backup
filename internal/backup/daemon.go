@@ -177,6 +177,7 @@ type Daemon struct {
 	runs    []Run
 	running bool
 	wake    chan struct{} // the schedule, when the times change
+	keys    []KeyInfo     // the source's keys, as last read
 	client  *http.Client
 	ctx     context.Context // set by Start: a copy made after it gets its loop then
 }
@@ -324,6 +325,7 @@ func (d *Daemon) Handler(local bool) http.Handler {
 	mux.HandleFunc("GET /v1/runs", d.getRuns)
 	mux.HandleFunc("PUT /v1/config", d.putConfig)
 	mux.HandleFunc("PUT /v1/key", d.putKey)
+	mux.HandleFunc("GET /v1/keys", d.getKeys)
 	// The phone app knows one machine; this is how it finds the others.
 	mux.HandleFunc("GET /v1/peers", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"self": d.Mesh.Self(), "peers": d.Mesh.Peers()})
@@ -660,6 +662,11 @@ func (d *Daemon) Start(ctx context.Context) {
 	go d.expireLoop(ctx)
 	if source != nil {
 		go d.schedule(ctx)
+		if d.self != nil {
+			if _, ok := d.self.Map().Objects["config"]; ok && d.HasKey() {
+				go d.refreshKeys(ctx)
+			}
+		}
 	}
 }
 
@@ -793,6 +800,7 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 		if _, err := d.restic(ctx, "init"); err != nil {
 			return err
 		}
+		d.labelPending(ctx)
 	}
 	paths, exclude := s.Resolve()
 	if len(paths) == 0 {
@@ -826,6 +834,7 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 	if !s.KeepLocal {
 		d.unstage(ctx, m)
 	}
+	d.refreshKeys(ctx)
 	return nil
 }
 

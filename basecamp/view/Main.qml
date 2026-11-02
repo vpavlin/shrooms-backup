@@ -609,6 +609,18 @@ Item {
         property var chosen: ({})
         property var mirrorsChosen: ({})
         property var ownersChosen: ({})
+        // Its keys, for owners: which card or passphrase opens its backups.
+        property var keyList: null
+        function loadKeys() {
+            keyList = null
+            if (!machine || !machine.info.owner || !machine.info.source || machine.info.key === false) return
+            var r = root.core("get", [machine.address, "/v1/keys"])
+            if (r && !r.error) keyList = r
+        }
+        function keyLine(k) {
+            var d = new Date(k.created)
+            return k.label + (k.current ? " - in use" : "") + (isNaN(d.getTime()) ? "" : " - since " + d.toLocaleDateString(Qt.locale(), "d MMM yyyy"))
+        }
         spacing: 10
 
         // From machine, not info: in machine's change handler, info's
@@ -636,6 +648,7 @@ Item {
             mirror.checked = !!info.mirror
             alwaysOn.checked = !!info.always_on
             quota.text = String(info.quota_gb || 10)
+            Qt.callLater(loadKeys)
         }
         // Reset when another machine is picked, not on every poll: a poll
         // must not undo what is being typed.
@@ -689,13 +702,43 @@ Item {
         }
 
         Panel {
+            visible: !!s.machine && s.editable && !!s.info.source
+            width: parent.width; height: keyCol.implicitHeight + 24
+            Column {
+                id: keyCol
+                x: 12; y: 12; width: parent.width - 24; spacing: 6
+                Text { text: "Keys"; color: root.cBone; font.pixelSize: 13 }
+                Label_ {
+                    visible: s.info.key === false; width: parent.width; color: root.cAmber
+                    text: "No key yet, so it cannot back up. With the Keycard in a reader: shrooms-backup key --keycard --machine " + (s.machine ? s.machine.name : "")
+                }
+                Dim { visible: s.info.key !== false && s.keyList === null; text: "Reading its keys..." }
+                Dim { visible: !!s.keyList && !!s.keyList.pending; text: "It has a key; its first backup will make the repository." }
+                Repeater {
+                    model: s.keyList && s.keyList.keys ? s.keyList.keys : []
+                    delegate: Row {
+                        required property var modelData
+                        spacing: 8
+                        Dot { anchors.verticalCenter: parent.verticalCenter; color: modelData.current ? root.cPhosphor : root.cAsh }
+                        Text { text: s.keyLine(modelData); color: root.cBone; font.pixelSize: 12 }
+                    }
+                }
+                Dim {
+                    width: parent.width
+                    visible: !!s.keyList && !!s.keyList.keys && s.keyList.keys.length > 0 && !s.keyList.keys.some(function(k) { return k.label.indexOf("Keycard") === 0 })
+                    text: "Only a passphrase opens these backups. Add the card's key: shrooms-backup key --keycard --machine " + (s.machine ? s.machine.name : "")
+                }
+            }
+        }
+
+        Panel {
             width: parent.width; height: srcCol.implicitHeight + 24
             Column {
                 id: srcCol
                 x: 12; y: 12; width: parent.width - 24; spacing: 8
                 Check {
                     label: "Back this machine up"; enabled: s.editable
-                    about: "It needs its key: until the phone and Keycard set it, `sudo shrooms-backup key` on the machine."
+                    about: "It needs its key: from the Keycard (shrooms-backup key --keycard --machine NAME, where a reader is), or `sudo shrooms-backup key` on the machine."
                     checked: s.isSource; onToggled: s.isSource = checked
                 }
                 Column {

@@ -63,7 +63,7 @@ bool isMeshAddress(const std::string& a)
 
 bool readable(const std::string& p)
 {
-    return p == "/v1/info" || p == "/v1/runs" || p == "/v1/presets" || p.compare(0, 11, "/v1/mirror/") == 0;
+    return p == "/v1/info" || p == "/v1/runs" || p == "/v1/presets" || p == "/v1/keys" || p.compare(0, 11, "/v1/mirror/") == 0;
 }
 
 // Nothing that could leave the request line, nor reach a repository.

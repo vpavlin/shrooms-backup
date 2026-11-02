@@ -12,7 +12,7 @@ Item {
 
     readonly property var infos: ({
         "local": { name: "jimmy-crib", mirror: false, always_on: false, quota: 10737418240, used: 0, quota_gb: 10, owners: [],
-                   owner: true, running: false, next: new Date(now.getTime() + 3600000).toISOString(), holds: [], held: [],
+                   owner: true, key: true, running: false, next: new Date(now.getTime() + 3600000).toISOString(), holds: [], held: [],
                    source: { presets: ["shrooms", "keys"], paths: ["/var/tmp/shrooms-backup-test"], times: ["03:30", "15:30"],
                              mirrors: ["proteus", "scribe", "vps"], keep_daily: 14, keep_weekly: 12 },
                    last_run: { started: iso(62), finished: iso(60), ok: true, added: "696 B", data_added: 696, stored: 40569511, files: 812,
@@ -55,6 +55,9 @@ Item {
             if (method === "get" && args[1] === "/v1/presets")
                 return JSON.stringify({ shrooms: { about: "the mesh identity" }, keys: { about: "SSH, GPG" }, agents: { about: "Shrooms Agents" } })
             if (method === "get" && args[1] === "/v1/runs") return JSON.stringify({ runs: h.runs() })
+            if (method === "get" && args[1] === "/v1/keys") return JSON.stringify({ keys: [
+                { id: "a1b2c3d4", label: "Keycard 6e021332", created: "2026-11-02T08:38:17+01:00", current: true },
+                { id: "e5f6a7b8", label: "passphrase", created: "2026-11-01T21:30:00+01:00", current: false }] })
             if (method === "send") return JSON.stringify({ saved: true, restart: false })
             return JSON.stringify({ error: "unexpected " + method })
         }

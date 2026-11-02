@@ -114,4 +114,9 @@ t("bars", () => {
   assert.deepEqual(m.bars([7, 7], false), [1, 1]);
 });
 
+t("a key's line says which and whether in use, never more", () => {
+  assert.equal(m.keyLine({ id: "a1", label: "Keycard 6e021332", created: "2026-11-02T08:38:17+01:00", current: true }), "Keycard 6e021332 · in use · since 2 Nov 2026");
+  assert.equal(m.keyLine({ id: "b2", label: "passphrase", created: "", current: false }), "passphrase");
+});
+
 console.log(n + " passed");

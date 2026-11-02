@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -118,7 +119,7 @@ func TestASourceAndItsMirror(t *testing.T) {
 	// old one, so every backup stays readable with either; the daemon backs
 	// up with the new one from then on.
 	putKey := func(k string) (int, string) {
-		req, _ := http.NewRequest("PUT", lSrv.URL+"/v1/key", strings.NewReader(`{"key":"`+k+`"}`))
+		req, _ := http.NewRequest("PUT", lSrv.URL+"/v1/key", strings.NewReader(`{"key":"`+k+`","label":"Keycard 6e021332"}`))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -136,6 +137,24 @@ func TestASourceAndItsMirror(t *testing.T) {
 	if code, _ := putKey("short"); code != 400 {
 		t.Errorf("a short key: %d", code)
 	}
+	// Its owners see both keys: the card's, labelled and in use, and the old.
+	resp, err := http.Get(lSrv.URL + "/v1/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ks struct {
+		Keys  []KeyInfo
+		Error string
+	}
+	json.NewDecoder(resp.Body).Decode(&ks)
+	resp.Body.Close()
+	labels := map[string]bool{}
+	for _, k := range ks.Keys {
+		labels[k.Label] = k.Current
+	}
+	if len(ks.Keys) != 2 || labels["Keycard 6e021332"] != true || labels["passphrase"] != false {
+		t.Errorf("keys: %+v %s", ks.Keys, ks.Error)
+	}
 	os.WriteFile(filepath.Join(data, "fb"), []byte("after the new key"), 0o644)
 	if run := l.RunSource(ctx); !run.OK {
 		t.Fatalf("a run with the new key: %+v", run)
@@ -150,7 +169,7 @@ func TestASourceAndItsMirror(t *testing.T) {
 
 	// Somebody else on the mesh: no.
 	pMesh.Set("proteus", map[string]netip.Addr{"stranger": loopback})
-	resp, err := http.Get(pSrv.URL + "/v1/repo/laptop/config")
+	resp, err = http.Get(pSrv.URL + "/v1/repo/laptop/config")
 	if err != nil {
 		t.Fatal(err)
 	}

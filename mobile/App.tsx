@@ -14,7 +14,7 @@ import { store } from "./src/store";
 import {
   bars, duration, formOf, formProblem, mergeKnown, mirrorChoices, mirrorLine, ownerChoices, parseLink, roleOf,
   runText, seconds, settingsOf, size, sourceLine, storageText, stateOf, toggled, when, whatOf,
-  type Form, type Machine, type Peer, type Run, type Tone,
+  keyLine, type Form, type KeyInfo, type Machine, type Peer, type Run, type Tone,
 } from "./src/model";
 
 const C = {
@@ -350,6 +350,13 @@ function SettingsScreen({ machine, machines, peers, onSaved, onError }: {
   const [saving, setSaving] = useState(false);
   const set = (p: Partial<Form>) => setF((x) => ({ ...x, ...p }));
   useEffect(() => { api.presets(machine.base).then(setPresets).catch(() => {}); }, [machine.base]);
+  // Its keys, for owners: which card or passphrase opens its backups. Read
+  // from the repository, so it takes a few seconds.
+  const [keys, setKeys] = useState<{ list: KeyInfo[]; pending?: boolean } | null>(null);
+  useEffect(() => {
+    if (!i.owner || !i.source) return;
+    api.keys(machine.base).then((r) => setKeys({ list: r.keys || [], pending: r.pending })).catch(() => setKeys(null));
+  }, [machine.base, i.owner, !!i.source]);
 
   const problem = formProblem(f);
   const restarts = f.mirror !== i.mirror || f.isSource !== !!i.source || (f.mirror && parseInt(f.quotaGb) !== (i.quota_gb || 10));
@@ -368,6 +375,26 @@ function SettingsScreen({ machine, machines, peers, onSaved, onError }: {
   return (
     <ScrollView contentContainerStyle={s.pad} keyboardShouldPersistTaps="handled">
       <Text style={s.h}>{i.name}</Text>
+      {i.owner && i.source && (
+        <View style={s.card}>
+          <Text style={s.body}>Keys</Text>
+          {i.key === false ? (
+            <Text style={[s.small, { color: C.amber }]}>No key yet, so it cannot back up. With the Keycard in a reader: shrooms-backup key --keycard --machine {i.name}</Text>
+          ) : keys === null ? (
+            <Text style={s.small}>Reading its keys…</Text>
+          ) : keys.pending ? (
+            <Text style={s.small}>It has a key; its first backup will make the repository.</Text>
+          ) : keys.list.map((k) => (
+            <View key={k.id} style={[s.row, { marginTop: 4 }]}>
+              <Dot tone={k.current ? "ok" : "none"} />
+              <Text style={[s.small, { flex: 1, color: C.bone }]}>{keyLine(k)}</Text>
+            </View>
+          ))}
+          {keys && !keys.pending && keys.list.length > 0 && !keys.list.some((k) => k.label.startsWith("Keycard")) && (
+            <Text style={[s.small, { marginTop: 6 }]}>Only a passphrase opens these backups. Add the card's key: shrooms-backup key --keycard --machine {i.name}</Text>
+          )}
+        </View>
+      )}
       {ro && (
         <View style={[s.card, { borderColor: C.amber }]}>
           <Text style={s.body}>Read only: this phone is not among {i.name}'s owners. Add it there, from a device that is (Shrooms Backup in Basecamp), or in /etc/shrooms-backup/config.json.</Text>
@@ -375,7 +402,7 @@ function SettingsScreen({ machine, machines, peers, onSaved, onError }: {
       )}
       <View style={s.card}>
         <Check label="Back this machine up" on={f.isSource} disabled={ro} onChange={(v) => set({ isSource: v })}
-          about="It needs its key: until Keycard sets it, `sudo shrooms-backup key` on the machine." />
+          about="It needs its key: from the Keycard (shrooms-backup key --keycard --machine NAME, where a reader is), or `sudo shrooms-backup key` on the machine." />
         {f.isSource && (
           <>
             <Text style={[s.small, { marginTop: 8 }]}>What it backs up</Text>

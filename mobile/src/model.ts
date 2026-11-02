@@ -16,9 +16,11 @@ export interface Held { source: string; adopted: number; pending: number; missin
 export interface Info {
   name: string; mirror: boolean; always_on: boolean; quota: number; used: number; quota_gb?: number;
   owners?: string[]; source?: Source | null; last_run?: Run | null; running?: boolean; next?: string;
-  holds?: string[]; held?: Held[]; owner?: boolean; disk?: { free: number; total: number };
+  holds?: string[]; held?: Held[]; owner?: boolean; disk?: { free: number; total: number }; key?: boolean;
 }
 export interface Machine { name: string; base: string; info: Info }
+/** One of a source's keys, as its owners see it: never anything that opens it. */
+export interface KeyInfo { id: string; label: string; created: string; current: boolean }
 export interface Peer { name: string; mesh: string; overlay: string; overlay_v4?: string; online: boolean }
 export interface Settings {
   owners: string[]; always_on: boolean; mirror: boolean; quota_gb: number; source: Source | null;
@@ -237,4 +239,11 @@ export function bars(values: number[], fromZero = true): number[] {
   let base = fromZero ? 0 : min - Math.max((max - min) * 0.1, max * 0.05);
   if (max - base <= 0) base = max - 1;
   return values.map((v) => Math.max(0.02, (v - base) / (max - base)));
+}
+
+/** A key's line: "Keycard 6e021332 · in use · since 2 Nov", or a passphrase's. */
+export function keyLine(k: KeyInfo): string {
+  const d = new Date(k.created);
+  const since = isNaN(d.getTime()) ? "" : ` · since ${d.getDate()} ${d.toLocaleString("en", { month: "short" })} ${d.getFullYear()}`;
+  return `${k.label}${k.current ? " · in use" : ""}${since}`;
 }

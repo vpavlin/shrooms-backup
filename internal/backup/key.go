@@ -8,8 +8,121 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
+
+var keyLabel = regexp.MustCompile(`^[A-Za-z0-9 ._-]{0,40}$`)
+
+// KeyInfo is one of a source's keys, for its owners: which it is, where it
+// came from, when; never anything that opens it.
+type KeyInfo struct {
+	ID      string    `json:"id"`
+	Label   string    `json:"label"`
+	Created time.Time `json:"created"`
+	Current bool      `json:"current"` // the one the daemon backs up with
+}
+
+// labels are the keys' labels by restic key ID, in the state directory: a
+// label is the apps' word for a key, not restic's.
+func (d *Daemon) labelsPath() string { return filepath.Join(d.State, "key-labels.json") }
+
+func (d *Daemon) labels() map[string]string {
+	m := map[string]string{}
+	if b, err := os.ReadFile(d.labelsPath()); err == nil {
+		json.Unmarshal(b, &m)
+	}
+	return m
+}
+
+// labelKey labels the key the daemon uses now. Before the repository exists
+// there is no key ID yet; the label waits for the first run, which makes it.
+func (d *Daemon) labelKey(ctx context.Context, label string) {
+	if _, ok := d.self.Map().Objects["config"]; !ok {
+		os.WriteFile(filepath.Join(d.State, "key-label-pending"), []byte(label), 0o600)
+		return
+	}
+	keys, err := d.resticKeys(ctx)
+	if err != nil {
+		d.Log.Warn("labelling the key", "err", err)
+		return
+	}
+	m := d.labels()
+	for _, k := range keys {
+		if k.Current {
+			m[k.ID] = label
+		}
+	}
+	b, _ := json.Marshal(m)
+	os.WriteFile(d.labelsPath(), b, 0o600)
+}
+
+// labelPending labels the first key once the first run has made the repository.
+func (d *Daemon) labelPending(ctx context.Context) {
+	p := filepath.Join(d.State, "key-label-pending")
+	if b, err := os.ReadFile(p); err == nil {
+		os.Remove(p)
+		d.labelKey(ctx, string(b))
+	}
+}
+
+func (d *Daemon) resticKeys(ctx context.Context) ([]KeyInfo, error) {
+	out, err := d.restic(ctx, "key", "list", "--json", "--no-lock")
+	if err != nil {
+		return nil, err
+	}
+	// restic writes "created" as local time without a zone, "2026-11-02 09:05:45".
+	var raw []struct {
+		ID      string `json:"id"`
+		Current bool   `json:"current"`
+		Created string `json:"created"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "["):]), &raw); err != nil {
+		return nil, err
+	}
+	keys := make([]KeyInfo, 0, len(raw))
+	for _, k := range raw {
+		at, _ := time.ParseInLocation(time.DateTime, k.Created, time.Local)
+		keys = append(keys, KeyInfo{ID: k.ID, Created: at, Current: k.Current})
+	}
+	return keys, nil
+}
+
+// getKeys lists a source's keys for its owners.
+func (d *Daemon) getKeys(w http.ResponseWriter, r *http.Request) {
+	if !d.owner(callerOf(r)) {
+		fail(w, http.StatusForbidden, errors.New("owners only"))
+		return
+	}
+	if d.source() == nil || !d.HasKey() {
+		writeJSON(w, 200, map[string]any{"keys": []KeyInfo{}})
+		return
+	}
+	if _, ok := d.self.Map().Objects["config"]; !ok {
+		writeJSON(w, 200, map[string]any{"keys": []KeyInfo{}, "pending": true})
+		return
+	}
+	d.mu.Lock()
+	keys := append([]KeyInfo(nil), d.keys...)
+	d.mu.Unlock()
+	if keys == nil {
+		var err error
+		if keys, err = d.refreshKeys(r.Context()); err != nil {
+			fail(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	m := d.labels()
+	for i := range keys {
+		if keys[i].Label = m[keys[i].ID]; keys[i].Label == "" {
+			// Unlabelled: set on the machine, or before keys had labels.
+			keys[i].Label = "passphrase"
+		}
+		keys[i].ID = keys[i].ID[:min(8, len(keys[i].ID))]
+	}
+	writeJSON(w, 200, map[string]any{"keys": keys})
+}
 
 // putKey sets this source's key from an owner's device: the phone, which
 // derives it from the Keycard (ADR-001), or anything else an owner runs.
@@ -31,6 +144,10 @@ func (d *Daemon) putKey(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Key string `json:"key"`
+		// Label says where it came from, for the apps' list of keys:
+		// "Keycard 6e021332" (the card's key UID, the same on every card
+		// made from one seed).
+		Label string `json:"label"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
 		fail(w, http.StatusBadRequest, err)
@@ -41,10 +158,20 @@ func (d *Daemon) putKey(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, errors.New("a key is 16 to 512 characters on one line"))
 		return
 	}
+	if !keyLabel.MatchString(body.Label) {
+		fail(w, http.StatusBadRequest, errors.New("a label is up to 40 letters, digits, spaces, dots and dashes"))
+		return
+	}
 	how, err := d.SetKey(r.Context(), k)
 	if err != nil {
 		fail(w, http.StatusConflict, err)
 		return
+	}
+	if body.Label != "" {
+		d.labelKey(r.Context(), body.Label)
+	}
+	if _, ok := d.self.Map().Objects["config"]; ok {
+		d.refreshKeys(r.Context())
 	}
 	d.Log.Info("key set", "by", callerOf(r).name, "how", how)
 	writeJSON(w, 200, map[string]string{"key": how})
@@ -84,7 +211,7 @@ func (d *Daemon) SetKey(ctx context.Context, k string) (string, error) {
 		return "", err
 	}
 	defer os.Remove(tmp)
-	if _, err := d.restic(ctx, "key", "add", "--new-password-file", tmp); err != nil {
+	if _, err := d.restic(ctx, "key", "add", "--new-password-file", tmp, "--host", d.Mesh.Self(), "--user", "shrooms-backup"); err != nil {
 		return "", err
 	}
 	// Opened with the new key before it replaces the old one.
@@ -108,4 +235,18 @@ func writeKey(path, k string) error {
 func (d *Daemon) HasKey() bool {
 	_, err := os.Stat(d.Key)
 	return err == nil
+}
+
+// refreshKeys reads the keys again and keeps them: reading them takes the
+// repository's key files from the mirrors, seconds, and a Basecamp view
+// calls synchronously.
+func (d *Daemon) refreshKeys(ctx context.Context) ([]KeyInfo, error) {
+	keys, err := d.resticKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.keys = keys
+	d.mu.Unlock()
+	return append([]KeyInfo(nil), keys...), nil
 }

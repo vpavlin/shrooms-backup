@@ -440,11 +440,12 @@ func keyFromCard(machine, to, reader, sock string, check bool) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%s's backup key: fingerprint %s\n", machine, card.Fingerprint(k))
+	id := card.CardID(t)
+	fmt.Printf("%s's backup key: fingerprint %s, from card %s\n", machine, card.Fingerprint(k), id)
 	if check {
 		return nil
 	}
-	body, _ := json.Marshal(map[string]string{"key": k})
+	body, _ := json.Marshal(map[string]string{"key": k, "label": strings.TrimSpace("Keycard " + id)})
 	req, _ := http.NewRequest("PUT", url+"/v1/key", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)

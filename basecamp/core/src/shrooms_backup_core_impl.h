@@ -13,7 +13,7 @@
  * refused before anything is sent: fd00::/8 and 198.18.0.0/15 only.
  *
  * Only the daemons' state and settings pass through here, never a
- * repository: the paths are /v1/info, /v1/runs, /v1/presets, /v1/mirror/...
+ * repository: the paths are /v1/info, /v1/runs, /v1/presets, /v1/keys, /v1/mirror/...
  * to read, PUT /v1/config and POST /v1/run to write. The daemon decides who
  * may do what; an owner is named by the mesh, so this carries no secret.
  *

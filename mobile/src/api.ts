@@ -1,6 +1,6 @@
 // The backup daemon's HTTP API (port 7394 on each mesh address). Every call has a timeout: a machine
 // that is off or off-mesh must never leave the app spinning.
-import type { Info, Peer, Run, Settings } from "./model";
+import type { Info, KeyInfo, Peer, Run, Settings } from "./model";
 
 export class ApiError extends Error {
   status: number;
@@ -37,6 +37,7 @@ export const api = {
   peers: (b: string) => req<{ self: string; peers: Peer[] }>(b, "/v1/peers", {}, 5000),
   runs: (b: string) => req<{ runs: Run[] }>(b, "/v1/runs"),
   presets: (b: string) => req<Record<string, { about: string }>>(b, "/v1/presets"),
+  keys: (b: string) => req<{ keys: KeyInfo[]; pending?: boolean }>(b, "/v1/keys", {}, 30000),
   run: (b: string) => req<{ started: boolean }>(b, "/v1/run", { method: "POST", body: {} }),
   save: (b: string, s: Settings) => req<{ saved: boolean; restart: boolean }>(b, "/v1/config", { method: "PUT", body: s }, 10000),
 };
