@@ -8,6 +8,9 @@
 #   sudo bash install.sh --source /etc/shrooms --source /home/me/notes --mirrors proteus,scribe
 #   sudo bash install.sh --uninstall
 #
+# Run again, it updates: the program, and only the settings it is given
+# (sudo bash install.sh --mesh office); the rest of the config stays.
+#
 # Shrooms must be installed and this machine in a mesh (scripts/install.sh).
 #
 # What it does:
@@ -62,30 +65,30 @@ EOF
 
 MIRROR=false ALWAYS=false KEEP_LOCAL=false UNINSTALL=0 MESH="" QUOTA="" TIMES="03:00,15:00"
 BINARY="" STORAGE_BIN="" MIRRORS="" OWNERS=""
-SOURCES=() EXCLUDES=() PRESETS=()
+SOURCES=() EXCLUDES=() PRESETS=() GIVEN=""
 while [ $# -gt 0 ]; do
     case $1 in
-        --mirror) MIRROR=true; shift ;;
-        --always-on) ALWAYS=true; shift ;;
+        --mirror) MIRROR=true; GIVEN+=" mirror"; shift ;;
+        --always-on) ALWAYS=true; GIVEN+=" always"; shift ;;
         # A list as well as one at a time: "--preset shrooms,agents" was
         # written into the config as one preset of that name, and the daemon
         # refused to start (2026-11-02).
         --preset) IFS=, read -ra _p <<< "$2"
             for _x in "${_p[@]}"; do
                 case "$_x" in
-                    shrooms|agents|agent-history|foray|keys|services) PRESETS+=("$_x") ;;
+                    shrooms|agents|agent-history|foray|keys|services) PRESETS+=("$_x"); GIVEN+=" what" ;;
                     *) echo "  no preset \"$_x\": shrooms, agents, agent-history, foray, keys, services"; exit 2 ;;
                 esac
             done
             shift 2 ;;
-        --source) SOURCES+=("$2"); shift 2 ;;
-        --exclude) EXCLUDES+=("$2"); shift 2 ;;
-        --mirrors) MIRRORS=$2; shift 2 ;;
-        --times) TIMES=$2; shift 2 ;;
-        --keep-local) KEEP_LOCAL=true; shift ;;
-        --owners) OWNERS=$2; shift 2 ;;
+        --source) SOURCES+=("$2"); GIVEN+=" what"; shift 2 ;;
+        --exclude) EXCLUDES+=("$2"); GIVEN+=" exclude"; shift 2 ;;
+        --mirrors) MIRRORS=$2; GIVEN+=" mirrors"; shift 2 ;;
+        --times) TIMES=$2; GIVEN+=" times"; shift 2 ;;
+        --keep-local) KEEP_LOCAL=true; GIVEN+=" keep"; shift ;;
+        --owners) OWNERS=$2; GIVEN+=" owners"; shift 2 ;;
         --mesh) MESH=$2; shift 2 ;;
-        --quota-gb) QUOTA=$2; shift 2 ;;
+        --quota-gb) QUOTA=$2; GIVEN+=" quota"; shift 2 ;;
         --binary) BINARY=$2; shift 2 ;;
         --storage-bin) STORAGE_BIN=$2; shift 2 ;;
         --image) IMAGE=$2; shift 2 ;;
@@ -157,8 +160,17 @@ fi
 ADDR=$(mesh_addr "$MESH")
 [ -n "$ADDR" ] || { echo "  not on mesh \"$MESH\""; exit 1; }
 NSRC=$(( ${#SOURCES[@]} + ${#PRESETS[@]} ))
-[ $NSRC -gt 0 ] || [ "$MIRROR" = true ] || { echo "  nothing to do: --mirror, or --preset/--source with --mirrors"; usage 2; }
-[ $NSRC -eq 0 ] || [ -n "$MIRRORS" ] || { echo "  a source needs --mirrors"; exit 2; }
+# Run again on a machine already set up, it changes only what it is given
+# and keeps the rest of the config (and so whatever the apps set): having to
+# repeat every option to move the laptop to another mesh was confusing.
+CONFIG=/etc/shrooms-backup/config.json
+if [ ! -f "$CONFIG" ]; then
+    [ $NSRC -gt 0 ] || [ "$MIRROR" = true ] || { echo "  nothing to do: --mirror, or --preset/--source with --mirrors"; usage 2; }
+    [ $NSRC -eq 0 ] || [ -n "$MIRRORS" ] || { echo "  a source needs --mirrors"; exit 2; }
+else
+    OLD_MESH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mesh",""))' "$CONFIG" 2>/dev/null || true)
+    [ -n "$MESH" ] || MESH=$OLD_MESH
+fi
 ARCH=$(uname -m); case $ARCH in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
 echo "  on mesh $MESH at $ADDR ($ARCH)"
 
@@ -214,22 +226,41 @@ install -d -m 0700 /etc/shrooms-backup
 [ -n "$QUOTA" ] || QUOTA=10
 python3 - "$MESH" "$MIRROR" "$ALWAYS" "$OWNERS" "$QUOTA" "$MIRRORS" "$TIMES" "$KEEP_LOCAL" \
     "$(printf '%s\n' "${SOURCES[@]+"${SOURCES[@]}"}")" "$(printf '%s\n' "${EXCLUDES[@]+"${EXCLUDES[@]}"}")" \
-    "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" <<'PY'
-import json, sys
-mesh, mirror, always, owners, quota, mirrors, times, keep, sources, excludes, presets = sys.argv[1:]
+    "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" "$GIVEN" <<'PY'
+import json, os, sys
+mesh, mirror, always, owners, quota, mirrors, times, keep, sources, excludes, presets, given = sys.argv[1:]
+given = set(given.split())
 lst = lambda s, sep=",": [x.strip() for x in s.split(sep) if x.strip()]
-c = {"mesh": mesh, "mirror": mirror == "true", "always_on": always == "true",
-     "owners": lst(owners), "node": {"quota_gb": int(quota)}, "restic": "/usr/local/bin/restic"}
-if lst(sources, "\n") or lst(presets, "\n"):
-    c["source"] = {"presets": lst(presets, "\n"), "paths": lst(sources, "\n"), "exclude": lst(excludes, "\n"), "mirrors": lst(mirrors),
-                   "times": lst(times), "keep_local": keep == "true"}
-json.dump(c, open("/etc/shrooms-backup/config.json", "w"), indent=2)
+path = "/etc/shrooms-backup/config.json"
+old = json.load(open(path)) if os.path.exists(path) else None
+c = old or {"mirror": False, "always_on": False, "owners": [], "node": {}, "restic": "/usr/local/bin/restic"}
+c["mesh"] = mesh
+if old is None or "mirror" in given: c["mirror"] = mirror == "true"
+if old is None or "always" in given: c["always_on"] = always == "true"
+if old is None or "owners" in given: c["owners"] = lst(owners)
+if old is None or "quota" in given: c.setdefault("node", {})["quota_gb"] = int(quota)
+s = c.get("source")
+if "what" in given:
+    s = s or {"times": lst(times), "keep_local": False}
+    s["presets"], s["paths"] = lst(presets, "\n"), lst(sources, "\n")
+if s is not None:
+    if "exclude" in given or "exclude" not in s: s["exclude"] = lst(excludes, "\n")
+    if "mirrors" in given or not s.get("mirrors"): s["mirrors"] = lst(mirrors)
+    if "times" in given or not s.get("times"): s["times"] = lst(times)
+    if "keep" in given: s["keep_local"] = True
+    if not s["mirrors"]: sys.exit("  a source needs --mirrors")
+    c["source"] = s
+json.dump(c, open(path, "w"), indent=2)
 print("  " + ", ".join(filter(None, ["a mirror" if c["mirror"] else "",
       ("a source of " + " ".join(c["source"]["presets"] + c["source"]["paths"]) + " to " + ", ".join(c["source"]["mirrors"])) if "source" in c else ""])))
 PY
 chmod 600 /etc/shrooms-backup/config.json
 
 echo "==> the firewall"
+if [ -n "${OLD_MESH:-}" ] && [ "$OLD_MESH" != "$MESH" ]; then
+    a=$(mesh_addr "$OLD_MESH" || true)
+    [ -n "$a" ] && firewall remove "$a"
+fi
 firewall add "$ADDR"
 
 echo "==> the service"
