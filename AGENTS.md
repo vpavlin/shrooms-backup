@@ -13,3 +13,8 @@ daemon's status over its control socket (`internal/backup/mesh.go`).
   passed.
 - Logos Storage: never `--block-ttl 0` (it expires at once); a re-upload keeps
   its CID only with the same filename, type and block size.
+- Shrooms, Shrooms Agents and Shrooms Backup are separate apps (ADR-008): no
+  backup task goes through a Shrooms command, screen or app; code from
+  Shrooms is copied, never imported. One decision, one ADR, with a row in
+  `docs/adr/README.md`, in the same change: not a dated section appended to
+  an older one.
