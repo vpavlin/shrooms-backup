@@ -140,9 +140,20 @@ fi
 echo "==> checking this machine"
 [ -S "$SOCK" ] || { echo "  no shrooms daemon here: install shrooms first (scripts/install.sh)"; exit 1; }
 command -v python3 >/dev/null || { echo "  needs python3"; exit 1; }
-[ -n "$MESH" ] || MESH=$(status | python3 -c 'import json,sys
-ms=[m["label"] for m in json.load(sys.stdin).get("meshes") or [] if m.get("overlay")]
-print(ms[0] if ms else "")')
+# Without --mesh: the one mesh this machine is on, or the one its mirrors
+# are all on. Never simply the first: on the laptop that was "default",
+# where no mirror is, and its backups and the apps could not reach it
+# (2026-11-02).
+if [ -z "$MESH" ]; then
+    MESH=$(status | python3 -c 'import json,sys
+st=json.load(sys.stdin); want=[m for m in sys.argv[1].split(",") if m]
+ms=[m["label"] for m in st.get("meshes") or [] if m.get("overlay") and not m.get("disabled")]
+if len(ms)==1: print(ms[0]); sys.exit()
+on=lambda l: {p["name"] for p in st.get("peers") or [] if p.get("mesh")==l}
+fit=[l for l in ms if want and set(want) <= on(l)]
+print(fit[0] if len(fit)==1 else "")' "$MIRRORS")
+    [ -n "$MESH" ] || { echo "  which mesh do backups run on? This machine is on several; give --mesh LABEL (the one its mirrors are on)"; exit 2; }
+fi
 ADDR=$(mesh_addr "$MESH")
 [ -n "$ADDR" ] || { echo "  not on mesh \"$MESH\""; exit 1; }
 NSRC=$(( ${#SOURCES[@]} + ${#PRESETS[@]} ))
