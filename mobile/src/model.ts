@@ -17,6 +17,12 @@ export interface Info {
   name: string; mirror: boolean; always_on: boolean; quota: number; used: number; quota_gb?: number;
   owners?: string[]; source?: Source | null; last_run?: Run | null; running?: boolean; next?: string;
   holds?: string[]; held?: Held[]; owner?: boolean; disk?: { free: number; total: number }; key?: boolean;
+  meshes?: string[]; progress?: Progress | null;
+}
+/** A run under way: restic reading ("reading"), then each mirror fetching ("mirrors"). */
+export interface Progress {
+  phase: string; started?: string; files?: number; files_done?: number; bytes?: number; bytes_done?: number;
+  seconds_remaining?: number; mirrors?: Record<string, { bytes: number; done: number; ok?: boolean; error?: string }>;
 }
 export interface Machine { name: string; base: string; info: Info }
 /** One of a source's keys, as its owners see it: never anything that opens it. */
@@ -255,4 +261,29 @@ export function keyLine(k: KeyInfo): string {
   const d = new Date(k.created);
   const since = isNaN(d.getTime()) ? "" : ` · since ${d.getDate()} ${d.toLocaleString("en", { month: "short" })} ${d.getFullYear()}`;
   return `${k.label}${k.current ? " · in use" : ""}${since}`;
+}
+
+/** How long, roughly: "about 2 h", "about 25 min", "under a minute". */
+export function left(seconds: number): string {
+  if (seconds < 60) return "under a minute";
+  if (seconds < 90 * 60) return `about ${Math.round(seconds / 60)} min`;
+  return `about ${(seconds / 3600).toFixed(seconds < 10 * 3600 ? 1 : 0)} h`;
+}
+
+export interface Bar { label: string; fraction: number; tone: Tone }
+
+/** The bars for a run under way: one while restic reads, then one a mirror. None when nothing runs. */
+export function progressBars(i: Info): Bar[] {
+  const p = i.progress;
+  if (!i.running || !p) return [];
+  if (p.phase === "reading") {
+    if (!p.bytes) return [{ label: "Reading files…", fraction: 0, tone: "busy" }];
+    const rest = p.seconds_remaining ? `, ${left(p.seconds_remaining)} left` : "";
+    return [{ label: `Reading files: ${size(p.bytes_done || 0)} of ${size(p.bytes)}${rest}`, fraction: Math.min((p.bytes_done || 0) / p.bytes, 1), tone: "busy" }];
+  }
+  return Object.entries(p.mirrors || {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, mp]) => {
+    if (mp.error) return { label: `${name}: ${mp.error}`, fraction: mp.bytes ? mp.done / mp.bytes : 0, tone: "bad" as Tone };
+    if (mp.ok) return { label: `${name}: holds this run`, fraction: 1, tone: "ok" as Tone };
+    return { label: `${name}: ${size(mp.done)} of ${size(mp.bytes)}`, fraction: mp.bytes ? Math.min(mp.done / mp.bytes, 1) : 0, tone: "busy" as Tone };
+  });
 }

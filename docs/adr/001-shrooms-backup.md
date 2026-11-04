@@ -105,3 +105,6 @@ storing every object as a CID (`~/diag/backup-spike`):
 ## Later decisions
 
 Recorded at first as dated sections here, now records of their own: [002](002-its-own-repository.md) the repository, [003](003-presets-name-what-a-machine-keeps-the-first-fleet.md) presets and the fleet, [004](004-settings-come-from-the-apps-shrooms-backup-in-base.md) settings and Basecamp, [005](005-shrooms-backup-for-android.md) Android, [006](006-backups-take-a-bounded-share-of-a-disk.md) disk space, [007](007-keys-from-the-keycard-set-over-the-mesh.md) keys from the Keycard.
+
+**Since ADR-012** no wait is fixed: a source waits for a mirror, and a mirror for
+its fetch, as long as something moves.

@@ -210,6 +210,7 @@ type Daemon struct {
 	sprs    map[string]map[string]string // mesh -> device -> its node's SPR
 	runs    []Run
 	running bool
+	prog    *Progress     // the run under way, for the apps' bar
 	wake    chan struct{} // the schedule, when the times change
 	keys    []KeyInfo     // the source's keys, as last read
 	client  *http.Client
@@ -222,8 +223,11 @@ type mirrorCopy struct {
 	repo    *Repo
 	pending int64 // the newest map version asked for
 	missing int
-	err     string
-	newest  chan Map
+	// missingBytes is what the fetch still lacks, the whole map's live size
+	// while it is still finding out: never less than the truth.
+	missingBytes int64
+	err          string
+	newest       chan Map
 }
 
 // Run is one source run, for the apps.
@@ -635,6 +639,40 @@ type Info struct {
 	// Meshes are the ones backups run on here, the primary first; holds,
 	// owners and mirrors on any other are written name@mesh.
 	Meshes []string `json:"meshes"`
+	// Progress is the run under way, while Running.
+	Progress *Progress `json:"progress,omitempty"`
+}
+
+// Progress is a run under way, for a progress bar. restic first reads the
+// files and stores what is new in this machine's node ("reading": files and
+// bytes against what it found); then each mirror fetches what it lacks
+// ("mirrors": bytes of this run each holds).
+type Progress struct {
+	Phase     string    `json:"phase"`
+	Started   time.Time `json:"started"`
+	Files     int64     `json:"files"`
+	FilesDone int64     `json:"files_done"`
+	Bytes     int64     `json:"bytes"`
+	BytesDone int64     `json:"bytes_done"`
+	// Remaining is restic's own estimate while reading, in seconds.
+	Remaining int64                     `json:"seconds_remaining,omitempty"`
+	Mirrors   map[string]MirrorProgress `json:"mirrors,omitempty"`
+}
+
+// MirrorProgress is how much of a run one mirror holds.
+type MirrorProgress struct {
+	Bytes int64  `json:"bytes"`
+	Done  int64  `json:"done"`
+	OK    bool   `json:"ok,omitempty"` // it holds the run
+	Error string `json:"error,omitempty"`
+}
+
+func (d *Daemon) setProgress(f func(p *Progress)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.prog != nil {
+		f(d.prog)
+	}
 }
 
 // Info is the daemon's state as seen from mesh: the SPR is its node's there.
@@ -652,6 +690,14 @@ func (d *Daemon) Info(ctx context.Context, mesh string) Info {
 	in.Mirror, in.AlwaysOn, in.QuotaGB, in.Source = d.Cfg.Mirror, d.Cfg.AlwaysOn, d.Cfg.Node.QuotaGB, d.Cfg.Source
 	in.Owners = append([]string{}, d.Cfg.Owners...)
 	in.Running = d.running
+	if d.prog != nil {
+		p := *d.prog
+		p.Mirrors = map[string]MirrorProgress{}
+		for k, v := range d.prog.Mirrors {
+			p.Mirrors[k] = v
+		}
+		in.Progress = &p
+	}
 	if in.Source != nil {
 		next := nextTime(time.Now(), in.Source.Times)
 		in.Next = &next
@@ -756,7 +802,9 @@ func (d *Daemon) putMirror(w http.ResponseWriter, r *http.Request) {
 	d.learnSPR(c.mesh, source, body.SPR)
 	d.mu.Lock()
 	if body.Map.Version > mc.pending {
-		mc.pending = body.Map.Version
+		// All of it, until the fetch has looked: a source asking at once
+		// would otherwise read nothing missing, and draw a full bar.
+		mc.pending, mc.missingBytes = body.Map.Version, body.Map.Size(false)
 	}
 	d.mu.Unlock()
 	select {
@@ -794,8 +842,10 @@ type MirrorStatus struct {
 	Adopted int64  `json:"adopted"` // the newest map it holds in full
 	Pending int64  `json:"pending"`
 	Missing int    `json:"missing"`
-	Error   string `json:"error,omitempty"`
-	Bytes   int64  `json:"bytes"` // the adopted copy's size, held deletions included
+	// MissingBytes is what the fetch still lacks of the pending map.
+	MissingBytes int64  `json:"missing_bytes"`
+	Error        string `json:"error,omitempty"`
+	Bytes        int64  `json:"bytes"` // the adopted copy's size, held deletions included
 }
 
 func (d *Daemon) mirrorStatus(mc *mirrorCopy) MirrorStatus {
@@ -803,7 +853,7 @@ func (d *Daemon) mirrorStatus(mc *mirrorCopy) MirrorStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return MirrorStatus{Source: d.Cfg.Qualified(mc.source, mc.mesh), Mesh: mc.mesh, Adopted: m.Version, Pending: mc.pending,
-		Missing: mc.missing, Error: mc.err, Bytes: m.Size(true)}
+		Missing: mc.missing, MissingBytes: mc.missingBytes, Error: mc.err, Bytes: m.Size(true)}
 }
 
 // copyFor is the copy a request names, if the caller may read it.
@@ -834,6 +884,13 @@ func (d *Daemon) getMirror(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Stalled is how long a fetch, or a source waiting for a mirror, goes on
+// without anything moving before it gives up.
+var Stalled = 30 * time.Minute
+
+// pollEvery is how often a source asks a mirror how far it is.
+var pollEvery = 5 * time.Second
+
 // fetchLoop keeps one source's copy in step: for each newest map, fetch
 // every live object this node lacks, then adopt the map.
 func (d *Daemon) fetchLoop(ctx context.Context, mc *mirrorCopy) {
@@ -850,7 +907,7 @@ func (d *Daemon) fetchLoop(ctx context.Context, mc *mirrorCopy) {
 		if err != nil {
 			mc.err = err.Error()
 		} else {
-			mc.err, mc.missing = "", 0
+			mc.err, mc.missing, mc.missingBytes = "", 0, 0
 		}
 		d.mu.Unlock()
 		if err != nil {
@@ -891,22 +948,53 @@ func (d *Daemon) fetchAll(ctx context.Context, mc *mirrorCopy, m Map) error {
 		return err
 	}
 	store := d.storeOf(mc.mesh)
-	missing := map[string]int64{}
+	var total int64
+	for _, size := range want {
+		total += size
+	}
+	d.mu.Lock()
+	mc.missing, mc.missingBytes = len(want), total
+	d.mu.Unlock()
+	// The node's fetch returns when the object is here, so this pass is
+	// where the time goes: what is left is said after each one, or a 150 GB
+	// first run would show nothing fetched until it was all fetched (seen
+	// in a real two-node run, 2026-11-04).
+	missing, left, seen := map[string]int64{}, total, 0
 	for cid, size := range want {
-		if !store.Has(ctx, cid, size) {
+		seen++
+		if store.Has(ctx, cid, size) {
+			left -= size
+		} else {
 			missing[cid] = size
 			if err := store.Fetch(ctx, cid); err != nil {
 				return err
 			}
+			if store.Has(ctx, cid, size) {
+				delete(missing, cid)
+				left -= size
+			}
 		}
-	}
-	deadline := time.Now().Add(6 * time.Hour)
-	for len(missing) > 0 {
 		d.mu.Lock()
-		mc.missing = len(missing)
+		mc.missing, mc.missingBytes = len(want)-seen+len(missing), left
 		d.mu.Unlock()
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%d objects still missing after 6 h", len(missing))
+	}
+	// No fixed limit: 150 GB at 4-5 MiB/s is 9-10 hours, and 6 h failed a
+	// first run that was going fine (k11, 2026-11-04). Only a fetch that
+	// stops moving gives up.
+	moved, least := time.Now(), len(missing)
+	for len(missing) > 0 {
+		var left int64
+		for _, size := range missing {
+			left += size
+		}
+		d.mu.Lock()
+		mc.missing, mc.missingBytes = len(missing), left
+		d.mu.Unlock()
+		if len(missing) < least {
+			moved, least = time.Now(), len(missing)
+		}
+		if time.Since(moved) > Stalled {
+			return fmt.Errorf("%d objects still missing, none fetched for %v", len(missing), Stalled)
 		}
 		select {
 		case <-ctx.Done():
@@ -1034,8 +1122,9 @@ func (d *Daemon) RunSource(ctx context.Context) Run {
 		return Run{Error: "already running"}
 	}
 	d.running = true
+	d.prog = &Progress{Phase: "reading", Started: time.Now(), Mirrors: map[string]MirrorProgress{}}
 	d.mu.Unlock()
-	defer func() { d.mu.Lock(); d.running = false; d.mu.Unlock() }()
+	defer func() { d.mu.Lock(); d.running, d.prog = false, nil; d.mu.Unlock() }()
 
 	run := Run{Started: time.Now(), Mirrors: map[string]string{}}
 	err := d.runSource(ctx, &run)
@@ -1066,10 +1155,15 @@ func (d *Daemon) resticWith(ctx context.Context, key string, args ...string) (st
 	cmd.Env = append(os.Environ(),
 		"RESTIC_REPOSITORY=rest:"+d.localURL()+"/self/",
 		"RESTIC_PASSWORD_FILE="+key,
-		"RESTIC_CACHE_DIR="+filepath.Join(d.State, "restic-cache"))
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+		"RESTIC_CACHE_DIR="+filepath.Join(d.State, "restic-cache"),
+		// Its progress every 2 s: without a terminal it says it once a minute.
+		"RESTIC_PROGRESS_FPS=0.5")
+	// Two writers into one buffer, on exec's two copying goroutines: locked.
+	var out lockedBuffer
+	sw := &statusWriter{out: &out, status: d.resticStatus}
+	cmd.Stdout, cmd.Stderr = sw, &out
 	err := cmd.Run()
+	sw.Flush()
 	if err != nil {
 		tail := out.String()
 		if len(tail) > 600 {
@@ -1078,6 +1172,79 @@ func (d *Daemon) resticWith(ctx context.Context, key string, args ...string) (st
 		return out.String(), fmt.Errorf("restic %s: %w: %s", args[0], err, strings.TrimSpace(tail))
 	}
 	return out.String(), nil
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// statusWriter passes restic's --json output through, line by line, but for
+// its progress lines, which go to status: a 10-hour run would otherwise keep
+// every one of them.
+type statusWriter struct {
+	out    io.Writer
+	status func(line []byte)
+	part   []byte
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	w.part = append(w.part, b...)
+	for {
+		i := bytes.IndexByte(w.part, '\n')
+		if i < 0 {
+			break
+		}
+		w.line(w.part[:i+1])
+		w.part = w.part[i+1:]
+	}
+	return len(b), nil
+}
+
+func (w *statusWriter) Flush() {
+	if len(w.part) > 0 {
+		w.line(w.part)
+		w.part = nil
+	}
+}
+
+func (w *statusWriter) line(l []byte) {
+	if bytes.Contains(l, []byte(`"message_type":"status"`)) {
+		w.status(l)
+		return
+	}
+	w.out.Write(l)
+}
+
+// resticStatus takes restic's progress into the run's.
+func (d *Daemon) resticStatus(line []byte) {
+	var m struct {
+		Files     int64 `json:"total_files"`
+		FilesDone int64 `json:"files_done"`
+		Bytes     int64 `json:"total_bytes"`
+		BytesDone int64 `json:"bytes_done"`
+		Remaining int64 `json:"seconds_remaining"`
+	}
+	if json.Unmarshal(line, &m) != nil {
+		return
+	}
+	d.setProgress(func(p *Progress) {
+		if p.Phase == "reading" {
+			p.Files, p.FilesDone, p.Bytes, p.BytesDone, p.Remaining = m.Files, m.FilesDone, m.Bytes, m.BytesDone, m.Remaining
+		}
+	})
 }
 
 func (d *Daemon) runSource(ctx context.Context, run *Run) error {
@@ -1112,7 +1279,9 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 	if len(paths) == 0 {
 		return errors.New("none of this source's paths exist here")
 	}
-	args := []string{"backup", "--json", "--no-scan", "--host", d.Mesh.Self()}
+	// Scanning, which --no-scan skipped, is what gives restic a total, and
+	// the apps a percentage; it reads metadata only, beside the backup.
+	args := []string{"backup", "--json", "--host", d.Mesh.Self()}
 	for _, e := range exclude {
 		args = append(args, "--exclude", e)
 	}
@@ -1161,6 +1330,13 @@ func (d *Daemon) pushAll(ctx context.Context, m Map, run *Run) error {
 	if st, ok := d.storeOf(d.Cfg.SourceMesh()).(*Storage); ok {
 		spr, _ = st.SPR(ctx)
 	}
+	mirrors, size := d.source().Mirrors, m.Size(false) // not under setProgress's lock
+	d.setProgress(func(p *Progress) {
+		p.Phase = "mirrors"
+		for _, mirror := range mirrors {
+			p.Mirrors[mirror] = MirrorProgress{Bytes: size}
+		}
+	})
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, mirror := range d.source().Mirrors {
@@ -1168,6 +1344,15 @@ func (d *Daemon) pushAll(ctx context.Context, m Map, run *Run) error {
 		go func() {
 			defer wg.Done()
 			err := d.push(ctx, mirror, spr, m)
+			d.setProgress(func(p *Progress) {
+				mp := p.Mirrors[mirror]
+				if err != nil {
+					mp.Error = err.Error()
+				} else {
+					mp.OK, mp.Done = true, mp.Bytes
+				}
+				p.Mirrors[mirror] = mp
+			})
 			mu.Lock()
 			if err != nil {
 				run.Mirrors[mirror] = err.Error()
@@ -1232,21 +1417,36 @@ func (d *Daemon) push(ctx context.Context, mirror, spr string, m Map) error {
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("%s refused: %s", mirror, resp.Status)
 	}
-	deadline := time.Now().Add(6 * time.Hour)
-	for time.Now().Before(deadline) {
+	// Until it holds the run, as long as its fetch keeps moving: a first run
+	// of 150 GB takes longer than any fixed wait (fetchAll).
+	total := m.Size(false)
+	moved, least := time.Now(), int64(-1)
+	for {
 		var st MirrorStatus
 		if err := d.getJSON(ctx, base+"/v1/mirror/"+d.Mesh.Self(), &st); err == nil {
 			if st.Adopted >= m.Version {
 				return nil
 			}
+			if st.Pending >= m.Version {
+				if least < 0 || st.MissingBytes < least {
+					moved, least = time.Now(), st.MissingBytes
+				}
+				d.setProgress(func(p *Progress) {
+					mp := p.Mirrors[mirror]
+					mp.Done = max(total-st.MissingBytes, 0)
+					p.Mirrors[mirror] = mp
+				})
+			}
+		}
+		if time.Since(moved) > Stalled {
+			return fmt.Errorf("%s fetched nothing for %v (%s still to go)", mirror, Stalled, humanBytes(max(least, 0)))
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-time.After(pollEvery):
 		}
 	}
-	return errors.New("not in step after 6 h")
 }
 
 func (d *Daemon) getJSON(ctx context.Context, url string, v any) error {

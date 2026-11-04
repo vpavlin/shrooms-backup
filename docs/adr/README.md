@@ -13,3 +13,4 @@
 | [009](009-the-installer-updates.md) | One installer; run again, it updates only what it is given | accepted |
 | [010](010-logos-storage-ships-in-the-image.md) | logos-storage ships in the image, built by CI from the pinned commit; nothing an install needs comes from a mesh | accepted |
 | [011](011-backups-on-several-meshes.md) | Backups on several meshes: a node per mesh, names qualified by mesh, one limit for the machine | accepted; built |
+| [012](012-a-run-shows-its-progress-and-waits-while-it-moves.md) | A run shows its progress, and waits for a mirror as long as it moves | accepted; built |

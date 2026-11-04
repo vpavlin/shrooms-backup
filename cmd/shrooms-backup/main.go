@@ -236,6 +236,25 @@ func status() error {
 		fmt.Printf(", a mirror (always on: %v)", in.AlwaysOn)
 	}
 	fmt.Println()
+	if p := in.Progress; p != nil {
+		if p.Phase == "reading" {
+			fmt.Printf("backing up: reading files, %s of %s", size(p.BytesDone), size(p.Bytes))
+			if p.Remaining > 0 {
+				fmt.Printf(", about %s left", (time.Duration(p.Remaining) * time.Second).Round(time.Minute))
+			}
+			fmt.Println()
+		} else {
+			for name, m := range p.Mirrors {
+				state := fmt.Sprintf("%s of %s", size(m.Done), size(m.Bytes))
+				if m.OK {
+					state = "holds this run"
+				} else if m.Error != "" {
+					state = m.Error
+				}
+				fmt.Printf("backing up: %s %s\n", name, state)
+			}
+		}
+	}
 	if len(in.Meshes) > 1 {
 		fmt.Printf("on meshes %s (the first is the primary: devices elsewhere are name@mesh)\n", strings.Join(in.Meshes, ", "))
 	}
