@@ -19,11 +19,53 @@ jobs:
           bunzip2 r.bz2 && chmod +x r && sudo mv r /usr/local/bin/restic
       - run: make test
 
-  # The image scripts/install.sh copies the daemon out of; after the tests.
+  # logos-storage from the pinned upstream commit (ADR-010): upstream has no
+  # release with the fixes backups need, and the installer must not fetch it
+  # from a mesh. Built as upstream's own Dockerfile does, on native runners
+  # for each architecture, and cached by commit so only a new pin rebuilds.
+  storage:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      STORAGE_REPO: logos-storage/logos-storage-nim
+      STORAGE_COMMIT: be9807ff34943e205e9a780d31d78089efe38a19
+    steps:
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: logos-storage-${{ matrix.arch }}
+          key: logos-storage-${{ env.STORAGE_COMMIT }}-${{ matrix.arch }}-ubuntu-24.04
+      - name: build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y git cmake curl make build-essential
+          git init -q src && cd src
+          git remote add origin https://github.com/$STORAGE_REPO
+          git fetch -q --depth 1 origin $STORAGE_COMMIT && git checkout -q FETCH_HEAD
+          make -j4 update
+          make -j4 NIMFLAGS="-d:disableMarchNative"
+          cp build/storage ../logos-storage-${{ matrix.arch }}
+      - name: the pinned revision
+        run: |
+          ./logos-storage-${{ matrix.arch }} --version
+          ./logos-storage-${{ matrix.arch }} --version | grep -q "revision: ${STORAGE_COMMIT:0:7}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos-storage-${{ matrix.arch }}
+          path: logos-storage-${{ matrix.arch }}
+
+  # The image scripts/install.sh copies the daemon and logos-storage out of;
+  # after the tests.
   image:
     name: publish image
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, storage]
     if: github.event_name != 'pull_request'
     permissions:
       contents: read
@@ -34,6 +76,12 @@ jobs:
         with:
           go-version: '1.26.10'
       - run: make image-ctx
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: logos-storage-*
+          path: build
+          merge-multiple: true
+      - run: chmod 755 build/logos-storage-*
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

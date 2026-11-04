@@ -11,3 +11,4 @@
 | [007](007-keys-from-the-keycard-set-over-the-mesh.md) | Keys from the Keycard (EIP-1581 export + HKDF), set over the mesh, added beside, labelled | accepted; proteus and the laptop |
 | [008](008-separate-apps-separate-workflows.md) | Shrooms, Shrooms Agents and Shrooms Backup are separate apps with separate workflows | accepted |
 | [009](009-the-installer-updates.md) | One installer; run again, it updates only what it is given | accepted |
+| [010](010-logos-storage-ships-in-the-image.md) | logos-storage ships in the image, built by CI from the pinned commit; nothing an install needs comes from a mesh | accepted |

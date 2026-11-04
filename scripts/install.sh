@@ -17,10 +17,10 @@
 #   - takes shrooms-backup out of its image, ghcr.io/vpavlin/shrooms-backup,
 #     into /usr/local/bin (or --binary FILE);
 #   - restic, a pinned release checked by its sha256, into /usr/local/bin;
-#   - logos-storage, a pinned build checked by its sha256, into
-#     /usr/local/lib/shrooms-backup (or --storage-bin FILE): upstream has no
-#     release with the two fixes backups need yet (#1540, #1575), so it is
-#     jimmy-crib's build of them, reachable on our office mesh, amd64 only;
+#   - logos-storage, from the same image, into /usr/local/lib/shrooms-backup
+#     (or --storage-bin FILE): upstream has no release with the two fixes
+#     backups need yet (#1540, #1575), so the image carries CI's build of the
+#     pinned commit, for amd64 and arm64 (ADR-010);
 #   - /etc/shrooms-backup/config.json: the mesh, the roles, the owners;
 #   - opens TCP 7394 (the API) and the node's port (8590) to this machine's
 #     address on that mesh only, when firewalld or ufw is running;
@@ -37,8 +37,6 @@ SOCK=/run/shrooms/shrooms.sock
 RESTIC_VERSION=0.19.1
 declare -A RESTIC_SHA=([amd64]=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
                        [arm64]=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465)
-STORAGE_URL=${STORAGE_URL:-https://jimmy-crib.office.mesh:8444/storage-bin/logos-storage-be9807f-linux-amd64}
-STORAGE_SHA=${STORAGE_SHA:-75f8f1d60369f14c6782f461316f4a7fa663fe752ca01f1e70c92defd21fe5ae}
 PORTS="7394 8590"
 
 usage() {
@@ -57,7 +55,7 @@ Options:
   --mesh LABEL        the mesh to run on (default: this machine's first)
   --quota-gb N        the most backups may take on this disk, in GB (default 10)
   --binary FILE       use this shrooms-backup instead of the image's
-  --storage-bin FILE  use this logos-storage instead of the pinned build
+  --storage-bin FILE  use this logos-storage instead of the image's
   --uninstall         stop and remove it (the backups on mirrors stay)
 EOF
     exit "${1:-0}"
@@ -174,20 +172,30 @@ fi
 ARCH=$(uname -m); case $ARCH in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
 echo "  on mesh $MESH at $ADDR ($ARCH)"
 
-echo "==> shrooms-backup"
-if [ -n "$BINARY" ]; then
-    install -m 0755 "$BINARY" /usr/local/bin/shrooms-backup
-else
+# Both programs come out of one image, unless both are given: logos-storage
+# came from a server on our office mesh once, and a machine on any other mesh
+# could not install (k11, 2026-11-04).
+cid=
+if [ -z "$BINARY" ] || [ -z "$STORAGE_BIN" ]; then
     RUNTIME=$(command -v podman || command -v docker || true)
-    [ -n "$RUNTIME" ] || { echo "  neither docker nor podman, and no --binary"; exit 1; }
+    [ -n "$RUNTIME" ] || { echo "  neither docker nor podman: give both --binary and --storage-bin"; exit 1; }
     "$RUNTIME" pull -q "$IMAGE" >/dev/null 2>&1 || "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1 ||
         { echo "  could not get $IMAGE"; exit 1; }
     cid=$("$RUNTIME" create "$IMAGE")
     trap '"$RUNTIME" rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-    tmp=$(mktemp)
-    "$RUNTIME" cp "$cid:/usr/bin/shrooms-backup" "$tmp"
-    install -m 0755 "$tmp" /usr/local/bin/shrooms-backup
+fi
+from_image() { # PATH-IN-IMAGE DEST
+    local tmp; tmp=$(mktemp)
+    "$RUNTIME" cp "$cid:$1" "$tmp" || { echo "  $IMAGE has no $1: an image from before ADR-010?"; rm -f "$tmp"; exit 1; }
+    install -m 0755 "$tmp" "$2"
     rm -f "$tmp"
+}
+
+echo "==> shrooms-backup"
+if [ -n "$BINARY" ]; then
+    install -m 0755 "$BINARY" /usr/local/bin/shrooms-backup
+else
+    from_image /usr/bin/shrooms-backup /usr/local/bin/shrooms-backup
 fi
 command -v restorecon >/dev/null && restorecon /usr/local/bin/shrooms-backup 2>/dev/null || true
 
@@ -210,16 +218,12 @@ echo "==> logos-storage"
 install -d -m 0755 /usr/local/lib/shrooms-backup
 if [ -n "$STORAGE_BIN" ]; then
     install -m 0755 "$STORAGE_BIN" /usr/local/lib/shrooms-backup/logos-storage
-elif [ -x /usr/local/lib/shrooms-backup/logos-storage ] &&
-     echo "$STORAGE_SHA  /usr/local/lib/shrooms-backup/logos-storage" | sha256sum -c --quiet 2>/dev/null; then
-    echo "  already here"
 else
-    [ "$ARCH" = amd64 ] || { echo "  the pinned build is amd64 only: give one with --storage-bin"; exit 1; }
-    t=$(mktemp)
-    curl -fsSLk -o "$t" "$STORAGE_URL" || { echo "  could not fetch $STORAGE_URL (on the office mesh): --storage-bin"; exit 1; }
-    echo "$STORAGE_SHA  $t" | sha256sum -c --quiet || { echo "  its checksum does not match"; rm -f "$t"; exit 1; }
-    install -m 0755 "$t" /usr/local/lib/shrooms-backup/logos-storage && rm -f "$t"
+    from_image /usr/lib/shrooms-backup/logos-storage /usr/local/lib/shrooms-backup/logos-storage
 fi
+/usr/local/lib/shrooms-backup/logos-storage --version >/dev/null 2>&1 ||
+    { echo "  logos-storage does not run here: it is built on Ubuntu 24.04 and needs a glibc and libstdc++ as new"; exit 1; }
+command -v restorecon >/dev/null && restorecon /usr/local/lib/shrooms-backup/logos-storage 2>/dev/null || true
 
 echo "==> the config"
 install -d -m 0700 /etc/shrooms-backup
