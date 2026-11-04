@@ -45,18 +45,17 @@ func (d *Daemon) putConfig(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	next := *d.Cfg
 	d.mu.Unlock()
+	// Apps from before ADR-011 rebuild the source without its mesh: keep it.
+	if s.Source != nil && s.Source.Mesh == "" && next.Source != nil {
+		s.Source.Mesh = next.Source.Mesh
+	}
 	next.Owners, next.AlwaysOn, next.Mirror, next.Node.QuotaGB, next.Source = s.Owners, s.AlwaysOn, s.Mirror, s.QuotaGB, s.Source
 	if err := next.fill(); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	if next.Mirror || next.Node.QuotaGB != d.Cfg.Node.QuotaGB {
-		var held int64
-		if st, ok := d.Store.(*Storage); ok {
-			if sp, err := st.Space(r.Context()); err == nil {
-				held = sp.QuotaUsed
-			}
-		}
+		_, held := d.space(r.Context())
 		if err := checkQuota(d.State, next.Node.QuotaGB, held); err != nil {
 			fail(w, http.StatusBadRequest, err)
 			return
@@ -68,7 +67,8 @@ func (d *Daemon) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.Lock()
 	cur := d.Cfg
-	restart := cur.Mirror != next.Mirror || cur.Node.QuotaGB != next.Node.QuotaGB || (cur.Source == nil) != (next.Source == nil)
+	restart := cur.Mirror != next.Mirror || cur.Node.QuotaGB != next.Node.QuotaGB || (cur.Source == nil) != (next.Source == nil) ||
+		cur.SourceMesh() != next.SourceMesh()
 	if !restart {
 		cur.Owners, cur.AlwaysOn, cur.Source = next.Owners, next.AlwaysOn, next.Source
 	}

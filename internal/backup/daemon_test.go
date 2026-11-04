@@ -38,7 +38,7 @@ func TestASourceAndItsMirror(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	p.Start(ctx)
-	pSrv := httptest.NewServer(p.Handler(false))
+	pSrv := httptest.NewServer(p.Handler("office"))
 	defer pSrv.Close()
 
 	// laptop, the source.
@@ -58,7 +58,7 @@ func TestASourceAndItsMirror(t *testing.T) {
 	if err := l.Open(); err != nil {
 		t.Fatal(err)
 	}
-	lSrv := httptest.NewServer(l.Handler(true))
+	lSrv := httptest.NewServer(l.Handler(""))
 	defer lSrv.Close()
 	l.LocalURL = lSrv.URL
 
@@ -208,9 +208,9 @@ func TestSettings(t *testing.T) {
 	if err := d.Open(); err != nil {
 		t.Fatal(err)
 	}
-	mesh_ := httptest.NewServer(d.Handler(false))
+	mesh_ := httptest.NewServer(d.Handler("office"))
 	defer mesh_.Close()
-	local := httptest.NewServer(d.Handler(true))
+	local := httptest.NewServer(d.Handler(""))
 	defer local.Close()
 	put := func(url, body string) int {
 		req, _ := http.NewRequest("PUT", url+"/v1/config", strings.NewReader(body))

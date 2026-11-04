@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -90,23 +91,39 @@ func daemon(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The mesh: which address to run on, and who everybody is. The daemon
-	// may come up after us (a boot); wait for it.
+	// The meshes: which addresses to run on, and who everybody is. The
+	// daemon may come up after us (a boot); wait until it says this machine
+	// is on at least one of the backups' meshes (ADR-011).
 	mesh := &backup.Mesh{Socket: *sock}
-	ip, ok := mesh.Addresses()[cfg.Mesh]
-	for !ok {
+	on := func() (map[string]netip.Addr, []string) {
+		have, missing := map[string]netip.Addr{}, []string{}
+		addrs := mesh.Addresses()
+		for _, m := range cfg.Meshes {
+			if a, ok := addrs[m]; ok {
+				have[m] = a
+			} else {
+				missing = append(missing, m)
+			}
+		}
+		return have, missing
+	}
+	ips, missing := on()
+	for len(ips) == 0 {
 		if err := mesh.Refresh(ctx); err != nil {
 			log.Warn("waiting for the shrooms daemon", "err", err)
 		}
-		if ip, ok = mesh.Addresses()[cfg.Mesh]; ok {
+		if ips, missing = on(); len(ips) > 0 {
 			break
 		}
-		log.Warn("waiting to be on the backups' mesh", "mesh", cfg.Mesh)
+		log.Warn("waiting to be on one of the backups' meshes", "meshes", cfg.Meshes)
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(10 * time.Second):
 		}
+	}
+	if len(missing) > 0 {
+		log.Warn("not on every mesh backups run on: serving the others, and starting again when it joins", "missing", missing)
 	}
 	go func() {
 		for {
@@ -117,31 +134,62 @@ func daemon(args []string) error {
 				if err := mesh.Refresh(ctx); err != nil {
 					log.Warn("mesh", "err", err)
 				}
+				// A mesh joined since: its node and API need a start, and
+				// systemd gives one (Restart=always).
+				if _, now := on(); len(now) < len(missing) {
+					log.Info("on another of the backups' meshes now; starting again to serve it")
+					stop()
+					return
+				}
 			}
 		}
 	}()
 
-	quota, lowered := backup.AllowedQuota(*state, cfg.Node.QuotaGB, dirSize(filepath.Join(*state, "node")))
+	// A node per mesh, each in its own store (node-<mesh>); the store kept
+	// before there was more than one mesh is the primary's.
+	if err := migrateNodeDir(*state, cfg.Primary()); err != nil {
+		return err
+	}
+	var held int64
+	for _, m := range cfg.Meshes {
+		held += dirSize(filepath.Join(*state, "node-"+m))
+	}
+	quota, lowered := backup.AllowedQuota(*state, cfg.Node.QuotaGB, held)
 	if lowered != "" {
 		log.Warn(lowered)
 	}
-	node := backup.NewNode(backup.NodeConfig{Bin: cfg.Node.Bin, DataDir: filepath.Join(*state, "node"), IP: ip,
-		Port: cfg.Node.Port, APIPort: cfg.Node.APIPort, Quota: quota}, log)
 	cache, err := backup.NewCache(filepath.Join(*state, "cache"), *cacheMB<<20)
 	if err != nil {
 		return err
 	}
-	d := &backup.Daemon{Cfg: cfg, State: *state, Key: *key, Log: log, Mesh: mesh, Node: node, Store: node.Storage(), Cache: cache,
+	d := &backup.Daemon{Cfg: cfg, State: *state, Key: *key, Log: log, Mesh: mesh, Cache: cache, QuotaBytes: quota,
+		Nodes: map[string]*backup.Node{}, Stores: map[string]backup.Blobs{},
 		// systemd starts it again (Restart=always) with the saved settings.
 		ConfigPath: *cfgPath, Restart: func() { time.Sleep(time.Second); stop() }}
+	for _, m := range cfg.Meshes {
+		ip, ok := ips[m]
+		if !ok {
+			continue
+		}
+		port, api := cfg.Ports(m)
+		// Each node may take the whole quota: the machine's limit over all
+		// of them is kept by the daemon (putMirror).
+		n := backup.NewNode(backup.NodeConfig{Bin: cfg.Node.Bin, DataDir: filepath.Join(*state, "node-"+m), IP: ip,
+			Port: port, APIPort: api, Quota: quota}, log.With("mesh", m))
+		d.Nodes[m], d.Stores[m] = n, n.Storage()
+	}
 	if err := d.Open(); err != nil {
 		return err
 	}
-	// The nodes it knew, before it starts: the DHT is ours alone.
-	node.Bootstrap(d.KnownSPRs())
-	go node.Run(ctx)
-	if err := node.Ready(ctx, 2*time.Minute); err != nil {
-		return err
+	// The nodes each knew, before they start: each mesh's DHT is its own.
+	for m, n := range d.Nodes {
+		n.Bootstrap(d.KnownSPRs(m))
+		go n.Run(ctx)
+	}
+	for m, n := range d.Nodes {
+		if err := n.Ready(ctx, 2*time.Minute); err != nil {
+			return fmt.Errorf("the %s mesh's node: %w", m, err)
+		}
 	}
 	d.Start(ctx)
 
@@ -157,8 +205,10 @@ func daemon(args []string) error {
 		go func() { <-ctx.Done(); srv.Close() }()
 		srv.Serve(ln)
 	}
-	go serve(net.JoinHostPort(ip.String(), strconv.Itoa(backup.Port)), d.Handler(false))
-	go serve(net.JoinHostPort("127.0.0.1", strconv.Itoa(backup.Port+1)), d.Handler(true))
+	for m, ip := range ips {
+		go serve(net.JoinHostPort(ip.String(), strconv.Itoa(backup.Port)), d.Handler(m))
+	}
+	go serve(net.JoinHostPort("127.0.0.1", strconv.Itoa(backup.Port+1)), d.Handler(""))
 	<-ctx.Done()
 	return nil
 }
@@ -186,6 +236,9 @@ func status() error {
 		fmt.Printf(", a mirror (always on: %v)", in.AlwaysOn)
 	}
 	fmt.Println()
+	if len(in.Meshes) > 1 {
+		fmt.Printf("on meshes %s (the first is the primary: devices elsewhere are name@mesh)\n", strings.Join(in.Meshes, ", "))
+	}
 	if s := in.Source; s != nil {
 		fmt.Printf("backs up %s at %s to %s (keep %d daily, %d weekly)\n", strings.Join(s.Paths, " "),
 			strings.Join(s.Times, ", "), strings.Join(s.Mirrors, ", "), s.KeepDaily, s.KeepWeekly)
@@ -288,7 +341,8 @@ func setKey(args []string) error {
 func restore(args []string) error {
 	fs := flag.NewFlagSet("restore", flag.ExitOnError)
 	from := fs.String("from", "", "the mirror to read from (its device name)")
-	source := fs.String("source", "", "whose backup (default: this machine)")
+	source := fs.String("source", "", "whose backup (default: this machine); name@mesh, in the mirror's own labels, for one on another of its meshes")
+	cfgPath := fs.String("config", "/etc/shrooms-backup/config.json", "this machine's config, for the mesh it backs up over")
 	snap := fs.String("snapshot", "latest", "which snapshot")
 	target := fs.String("target", "", "where to put the files")
 	key := fs.String("key", "/etc/shrooms-backup/key", "the source's key")
@@ -302,12 +356,21 @@ func restore(args []string) error {
 	if err := mesh.Refresh(context.Background()); err != nil {
 		return err
 	}
+	// This machine's own backup is reached over the mesh it backs up on:
+	// the mirror finds its copy by the mesh the request comes from.
+	via := ""
 	if *source == "" {
 		*source = mesh.Self()
+		if cfg, err := backup.LoadConfig(*cfgPath); err == nil {
+			via = cfg.SourceMesh()
+		}
 	}
-	a, ok := mesh.Find(*from, "")
+	a, ok := mesh.Find(*from, via)
+	if !ok && via != "" {
+		a, ok = mesh.Find(*from, "")
+	}
 	if !ok {
-		return fmt.Errorf("%s is not on the mesh", *from)
+		return fmt.Errorf("%s is not on this machine's meshes", *from)
 	}
 	cmd := exec.Command(*resticBin, "restore", *snap, "--target", *target)
 	cmd.Env = append(os.Environ(),
@@ -381,6 +444,19 @@ func sizeOf(root string, exclude []string) int64 {
 		return nil
 	})
 	return n
+}
+
+// migrateNodeDir moves the store kept before there was more than one mesh,
+// node/, to the primary mesh's, node-<primary>/.
+func migrateNodeDir(state, primary string) error {
+	old, now := filepath.Join(state, "node"), filepath.Join(state, "node-"+primary)
+	if _, err := os.Stat(old); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(now); err == nil {
+		return fmt.Errorf("both %s and %s exist: which is the %s mesh's store?", old, now, primary)
+	}
+	return os.Rename(old, now)
 }
 
 // dirSize is what the node's store already takes: it counts as room a

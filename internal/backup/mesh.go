@@ -16,9 +16,10 @@ import (
 type Mesh struct {
 	Socket string // the daemon's control socket
 
-	mu    sync.Mutex
-	st    meshStatus
-	names map[netip.Addr]string
+	mu     sync.Mutex
+	st     meshStatus
+	names  map[netip.Addr]string
+	meshOf map[netip.Addr]string // the mesh an address is on
 }
 
 type meshStatus struct {
@@ -53,22 +54,22 @@ func (m *Mesh) Refresh(ctx context.Context) error {
 	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		return err
 	}
-	names := map[netip.Addr]string{}
+	names, meshOf := map[netip.Addr]string{}, map[netip.Addr]string{}
 	for _, p := range st.Peers {
 		for _, s := range []string{p.Overlay, p.OverlayV4} {
 			if a, err := netip.ParseAddr(s); err == nil {
-				names[a.Unmap()] = p.Name
+				names[a.Unmap()], meshOf[a.Unmap()] = p.Name, p.Mesh
 			}
 		}
 	}
 	// This machine, calling from its own mesh address, is itself.
 	for _, me := range st.Meshes {
 		if a, err := netip.ParseAddr(me.Overlay); err == nil {
-			names[a.Unmap()] = st.Name
+			names[a.Unmap()], meshOf[a.Unmap()] = st.Name, me.Label
 		}
 	}
 	m.mu.Lock()
-	m.st, m.names = st, names
+	m.st, m.names, m.meshOf = st, names, meshOf
 	m.mu.Unlock()
 	return nil
 }
@@ -87,6 +88,14 @@ func (m *Mesh) Who(a netip.Addr) string {
 	return m.names[a.Unmap()]
 }
 
+// WhoOn is the device at a mesh address and the mesh the address is on,
+// "" for what the mesh does not know (the mesh is "" where Set gave none).
+func (m *Mesh) WhoOn(a netip.Addr) (name, mesh string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.names[a.Unmap()], m.meshOf[a.Unmap()]
+}
+
 // Addresses are this machine's overlay addresses, by mesh label.
 func (m *Mesh) Addresses() map[string]netip.Addr {
 	m.mu.Lock()
@@ -100,8 +109,10 @@ func (m *Mesh) Addresses() map[string]netip.Addr {
 	return out
 }
 
-// Find is a device's address on a mesh this machine shares with it,
-// preferring mesh (the one the backups run on) when it is on it.
+// Find is a device's address on mesh, or, with mesh "", on any mesh this
+// machine shares with it. A device that is only on another mesh is not
+// found on this one: a source's copies are fetched from its node on the mesh
+// it backs up over, which a mirror elsewhere cannot reach.
 func (m *Mesh) Find(device, mesh string) (netip.Addr, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -117,7 +128,7 @@ func (m *Mesh) Find(device, mesh string) (netip.Addr, bool) {
 		if p.Mesh == mesh {
 			return a, true
 		}
-		if !any.IsValid() {
+		if mesh == "" && !any.IsValid() {
 			any = a
 		}
 	}
@@ -155,6 +166,26 @@ func (m *Mesh) Set(self string, peers map[string]netip.Addr) {
 	}
 	m.mu.Lock()
 	m.st, m.names = st, names
+	m.mu.Unlock()
+}
+
+// SetPeers gives the mesh's state with each peer's mesh (tests).
+func (m *Mesh) SetPeers(self string, peers []Peer) {
+	st := meshStatus{Name: self}
+	names, meshOf := map[netip.Addr]string{}, map[netip.Addr]string{}
+	for _, p := range peers {
+		st.Peers = append(st.Peers, struct {
+			Name      string `json:"name"`
+			Mesh      string `json:"mesh"`
+			Overlay   string `json:"overlay"`
+			OverlayV4 string `json:"overlay_v4"`
+			Online    *bool  `json:"online"`
+		}{Name: p.Name, Mesh: p.Mesh, Overlay: p.Overlay})
+		a := netip.MustParseAddr(p.Overlay).Unmap()
+		names[a], meshOf[a] = p.Name, p.Mesh
+	}
+	m.mu.Lock()
+	m.st, m.names, m.meshOf = st, names, meshOf
 	m.mu.Unlock()
 }
 
