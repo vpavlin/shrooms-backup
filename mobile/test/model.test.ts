@@ -30,6 +30,12 @@ t("one entry a machine, sorted", () => {
   assert.deepEqual(d.map((x) => x.base), ["first", "b-vps"]);
 });
 
+t("a machine on two meshes: the answer that says we own it wins, whichever came first", () => {
+  const d = m.dedupe([mach("scribe", { owner: false }, "home"), mach("scribe", { owner: true }, "office"), mach("scribe", { owner: false }, "late")]);
+  assert.deepEqual(d.map((x) => x.base), ["office"]);
+  assert.deepEqual(m.dedupe([mach("scribe", { owner: true }, "office"), mach("scribe", { owner: false }, "home")]).map((x) => x.base), ["office"]);
+});
+
 t("a machine that did not answer stays, marked stale", () => {
   const r = m.mergeKnown([mach("proteus")], [mach("proteus"), mach("scribe")]);
   assert.deepEqual(r.machines.map((x) => x.info.name), ["proteus", "scribe"]);

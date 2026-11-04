@@ -29,6 +29,9 @@ Item {
         var out = []
         for (var a in infos) out.push({ address: a, peer: a === "local" ? "" : infos[a].name, mesh: "office", info: infos[a] })
         out.push({ address: "fd00::9", peer: "jimmy-crib", mesh: "home", info: infos["local"] })   // the same machine on another mesh
+        // proteus again, on home, where it knows this device as an owner (ADR-011): that answer wins
+        var p = JSON.parse(JSON.stringify(infos["fd00::2"])); p.owner = true
+        out.push({ address: "fd00::12", peer: "proteus", mesh: "home", info: p })
         return out
     }
     function runs() {
