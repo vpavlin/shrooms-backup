@@ -110,6 +110,20 @@ t("mirrors to choose from", () => {
     { name: "proteus", about: "always on" }, { name: "vps", about: "not always on" }, { name: "scribe", about: "not reachable from here" }]);
 });
 
+t("a run's progress: reading, then each mirror", () => {
+  assert.deepEqual(m.progressBars(info("k11", { running: false, progress: { phase: "reading" } })), []);
+  assert.deepEqual(m.progressBars(info("k11", { running: true, progress: { phase: "reading" } })), [{ label: "Reading files…", fraction: 0, tone: "busy" }]);
+  const r = m.progressBars(info("k11", { running: true, progress: { phase: "reading", bytes: 150e9, bytes_done: 37.5e9, seconds_remaining: 7200 } }));
+  assert.deepEqual(r, [{ label: "Reading files: 38 GB of 150 GB, about 2.0 h left", fraction: 0.25, tone: "busy" }]);
+  const ms = m.progressBars(info("k11", { running: true, progress: { phase: "mirrors", mirrors: {
+    scribe: { bytes: 150e9, done: 15e9 }, proteus: { bytes: 150e9, done: 150e9, ok: true }, vps: { bytes: 100, done: 0, error: "vps fetched nothing for 30m0s" } } } }));
+  assert.deepEqual(ms.map((b) => [b.label, b.fraction, b.tone]), [
+    ["proteus: holds this run", 1, "ok"], ["scribe: 15 GB of 150 GB", 0.1, "busy"], ["vps: vps fetched nothing for 30m0s", 0, "bad"]]);
+  assert.equal(m.left(30), "under a minute");
+  assert.equal(m.left(25 * 60), "about 25 min");
+  assert.equal(m.left(11 * 3600), "about 11 h");
+});
+
 t("bars", () => {
   assert.deepEqual(m.bars([]), []);
   assert.deepEqual(m.bars([0, 5, 10]), [0.02, 0.5, 1]);

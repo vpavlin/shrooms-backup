@@ -12,7 +12,7 @@ import { api } from "./src/api";
 import { findMachines } from "./src/find";
 import { store } from "./src/store";
 import {
-  bars, duration, formOf, formProblem, mergeKnown, mirrorChoices, mirrorLine, ownerChoices, parseLink, roleOf,
+  bars, duration, formOf, formProblem, mergeKnown, mirrorChoices, mirrorLine, ownerChoices, parseLink, progressBars, roleOf,
   runText, seconds, settingsOf, size, sourceLine, storageText, stateOf, toggled, when, whatOf,
   keyLine, type Form, type KeyInfo, type Machine, type Peer, type Run, type Tone,
 } from "./src/model";
@@ -192,6 +192,14 @@ function Overview({ machines, stale, loading, onRefresh, onOpen, onRun }: {
             </View>
             <Text style={s.small}>{whatOf(i.source!)}</Text>
             <Text style={[s.body, l && !l.ok && !i.running && { color: C.rust }]}>{sourceLine(i)}</Text>
+            {progressBars(i).map((b) => (
+              <View key={b.label} style={{ marginTop: 6 }}>
+                <Text style={[s.small, b.tone === "bad" && { color: C.rust }]}>{b.label}</Text>
+                <View style={{ height: 6, borderRadius: 3, backgroundColor: C.raised, marginTop: 3, overflow: "hidden" }}>
+                  <View style={{ width: `${Math.round(b.fraction * 100)}%`, height: 6, backgroundColor: toneColour(b.tone) }} />
+                </View>
+              </View>
+            ))}
             <Text style={s.small}>Next {when(i.next)} (at {(i.source!.times || []).join(", ")}); keeps {i.source!.keep_daily} days and {i.source!.keep_weekly} weeks</Text>
             {(i.source!.mirrors || []).map((mi) => {
               const ln = mirrorLine(m, mi, machines);

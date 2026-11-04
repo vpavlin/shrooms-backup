@@ -152,6 +152,32 @@ Item {
 
     // --- words and numbers -----------------------------------------------------------
 
+    // A run under way, as bars: restic reading, then each mirror fetching
+    // (the daemon's progress; mobile/src/model.ts progressBars says the same).
+    function left(s) {
+        if (s < 60) return "under a minute"
+        if (s < 90 * 60) return "about " + Math.round(s / 60) + " min"
+        return "about " + (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"
+    }
+    function progressBars(info) {
+        var p = info ? info.progress : null
+        if (!info || !info.running || !p) return []
+        if (p.phase === "reading") {
+            if (!p.bytes) return [{ label: "Reading files...", fraction: 0, colour: cSky }]
+            return [{ label: "Reading files: " + size(p.bytes_done || 0) + " of " + size(p.bytes)
+                             + (p.seconds_remaining ? ", " + left(p.seconds_remaining) + " left" : ""),
+                      fraction: Math.min((p.bytes_done || 0) / p.bytes, 1), colour: cSky }]
+        }
+        var ms = p.mirrors || {}, out = []
+        Object.keys(ms).sort().forEach(function(n) {
+            var m = ms[n], f = m.bytes ? Math.min(m.done / m.bytes, 1) : 0
+            if (m.error) out.push({ label: n + ": " + m.error, fraction: f, colour: cRust })
+            else if (m.ok) out.push({ label: n + ": holds this run", fraction: 1, colour: cPhosphor })
+            else out.push({ label: n + ": " + size(m.done) + " of " + size(m.bytes), fraction: f, colour: cSky })
+        })
+        return out
+    }
+
     function size(n) {
         if (n === undefined || n === null) return "-"
         var u = ["B", "KB", "MB", "GB", "TB"], i = 0, f = n
@@ -442,6 +468,18 @@ Item {
                                               : src.last.ok ? "Last backed up " + root.when(src.last.finished) + ": " + (src.last.added || "nothing") + " new, " + root.size(src.last.stored) + " in all, took " + root.took(src.last) + "."
                                               : "The last run, " + root.when(src.last.started) + ", failed: " + src.last.error
                                         color: src.last && !src.last.ok && !src.info.running ? root.cRust : root.cBone
+                                    }
+                                    Repeater {
+                                        model: root.progressBars(src.info)
+                                        delegate: Column {
+                                            required property var modelData
+                                            width: sc.width; spacing: 3
+                                            Dim { width: parent.width; text: modelData.label; color: modelData.colour === root.cRust ? root.cRust : root.cAsh }
+                                            Rectangle {
+                                                width: parent.width; height: 6; radius: 3; color: root.cLine
+                                                Rectangle { width: parent.width * modelData.fraction; height: parent.height; radius: 3; color: modelData.colour }
+                                            }
+                                        }
                                     }
                                     Dim { text: "Next " + root.when(src.info.next) + " (at " + (src.info.source.times || []).join(", ") + "); keeps " + src.info.source.keep_daily + " days and " + src.info.source.keep_weekly + " weeks" }
                                     Repeater {
