@@ -51,10 +51,19 @@ export function parseLink(url: string | null): string | null {
   return null;
 }
 
-/** One entry a machine: a machine on two meshes, or added by hand and found as a peer, answers twice. */
+/**
+ * One entry a machine: a machine on two meshes, or added by hand and found as a peer, answers twice.
+ * The answer that says we are an owner wins: a machine on several meshes (ADR-011) knows a bare-named
+ * owner on its primary mesh only, so the same device asking over another mesh is read-only there, and
+ * keeping whichever answered first made the settings flip between editable and not.
+ */
 export function dedupe(ms: Machine[]): Machine[] {
   const by = new Map<string, Machine>();
-  for (const m of ms) if (m.info && m.info.name && !by.has(m.info.name)) by.set(m.info.name, m);
+  for (const m of ms) {
+    if (!m.info || !m.info.name) continue;
+    const had = by.get(m.info.name);
+    if (!had || (m.info.owner && !had.info.owner)) by.set(m.info.name, m);
+  }
   return [...by.values()].sort((a, b) => a.info.name.localeCompare(b.info.name));
 }
 

@@ -78,7 +78,10 @@ Item {
     }
 
     // One entry a machine: one on two meshes answers on both; this machine's
-    // own daemon, on loopback, is the one that knows it as the owner.
+    // own daemon, on loopback, is the one that knows it as the owner. For any
+    // other, the answer that says this device is an owner: a machine on
+    // several meshes knows a bare-named owner on its primary only (ADR-011),
+    // and the first answer made its settings read-only or not by chance.
     function readFound(found) {
         var byName = {}, order = []
         for (var i = 0; i < (found || []).length; i++) {
@@ -87,6 +90,7 @@ Item {
             var m = { key: name, address: f.address, name: name, mesh: f.mesh, local: f.address === "local", info: info }
             if (!(name in byName)) { order.push(name); byName[name] = m }
             else if (m.local) byName[name] = m
+            else if (!byName[name].local && info.owner && !byName[name].info.owner) byName[name] = m
         }
         order.sort(function(a, b) {
             var ma = byName[a], mb = byName[b]
