@@ -28,11 +28,16 @@ sudo bash install.sh --source /etc/shrooms --mirrors proteus,scribe   # back thi
 sudo shrooms-backup key                                          # its key, until the card sets it
 ```
 
+On a machine in several meshes, `--mesh office,home` runs backups on each: a
+mirror for both, the first named the primary. A source backs up over the mesh
+its mirrors are on. Devices on any mesh but the primary are named
+`name@mesh`, owners too ([ADR-011](docs/adr/011-backups-on-several-meshes.md)).
+
 Then `shrooms-backup status`, `shrooms-backup now`, and
 `shrooms-backup restore --from MIRROR --target DIR`.
 
 The daemon (`shrooms-backup daemon`, a root service) runs its own Logos
-Storage node on the mesh address, serves its API on that address (TCP 7394)
+Storage node on each mesh's address, serves its API on those addresses (TCP 7394)
 and on loopback (7395, where restic reaches this machine's repository), and
 learns the mesh from the Shrooms daemon's control socket.
 

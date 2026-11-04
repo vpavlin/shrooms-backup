@@ -21,5 +21,7 @@ refused to start with.
 - **The mesh:** the one in the config when there is one; otherwise this
   machine's only mesh, or the one every mirror named is on; otherwise it asks
   for `--mesh` rather than guess.
+  Since ADR-011 `--mesh` takes a list, and the same rule picks the mesh a
+  source backs up over.
 - **`--preset` takes a list**, and names it does not know are refused before
   anything is written.

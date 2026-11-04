@@ -9,7 +9,10 @@
 #   sudo bash install.sh --uninstall
 #
 # Run again, it updates: the program, and only the settings it is given
-# (sudo bash install.sh --mesh office); the rest of the config stays.
+# (sudo bash install.sh --mesh office,home); the rest of the config stays.
+#
+# A machine may run backups on several meshes (ADR-011): a mirror for each,
+# a storage node on each. A source backs up over the one its mirrors are on.
 #
 # Shrooms must be installed and this machine in a mesh (scripts/install.sh).
 #
@@ -37,7 +40,7 @@ SOCK=/run/shrooms/shrooms.sock
 RESTIC_VERSION=0.19.1
 declare -A RESTIC_SHA=([amd64]=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
                        [arm64]=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465)
-PORTS="7394 8590"
+API_PORT=7394
 
 usage() {
     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
@@ -52,7 +55,8 @@ Options:
   --times HH:MM,...   when to back up (default 03:00,15:00)
   --keep-local        keep this source's backup in its own node too
   --owners A,B        devices that may restore any backup here and start runs
-  --mesh LABEL        the mesh to run on (default: this machine's first)
+  --mesh A,B          the meshes to run on, the primary first (default: this
+                      machine's only mesh, or the one its mirrors are on)
   --quota-gb N        the most backups may take on this disk, in GB (default 10)
   --binary FILE       use this shrooms-backup instead of the image's
   --storage-bin FILE  use this logos-storage instead of the image's
@@ -61,7 +65,7 @@ EOF
     exit "${1:-0}"
 }
 
-MIRROR=false ALWAYS=false KEEP_LOCAL=false UNINSTALL=0 MESH="" QUOTA="" TIMES="03:00,15:00"
+MIRROR=false ALWAYS=false KEEP_LOCAL=false UNINSTALL=0 MESHES="" QUOTA="" TIMES="03:00,15:00"
 BINARY="" STORAGE_BIN="" MIRRORS="" OWNERS=""
 SOURCES=() EXCLUDES=() PRESETS=() GIVEN=""
 while [ $# -gt 0 ]; do
@@ -85,7 +89,7 @@ while [ $# -gt 0 ]; do
         --times) TIMES=$2; GIVEN+=" times"; shift 2 ;;
         --keep-local) KEEP_LOCAL=true; GIVEN+=" keep"; shift ;;
         --owners) OWNERS=$2; GIVEN+=" owners"; shift 2 ;;
-        --mesh) MESH=$2; shift 2 ;;
+        --mesh|--meshes) MESHES=$2; shift 2 ;;
         --quota-gb) QUOTA=$2; GIVEN+=" quota"; shift 2 ;;
         --binary) BINARY=$2; shift 2 ;;
         --storage-bin) STORAGE_BIN=$2; shift 2 ;;
@@ -104,22 +108,45 @@ for m in json.load(sys.stdin).get("meshes") or []:
     if m.get("label")==sys.argv[1] and m.get("overlay"): print(m["overlay"])' "$1"
 }
 
-firewall() { # add | remove ADDRESS
-    local verb=$1 a=$2 p
+# node_port INDEX: a mesh's storage node port, by its place in the list,
+# as the daemon gives it (Config.Ports): 8590 for the primary, then +2.
+node_port() { echo $(( 8590 + 2 * $1 )); }
+
+firewall() { # add | remove ADDRESS "PORTS"
+    local verb=$1 a=$2 ports=$3 p
     if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-        for p in $PORTS; do
+        for p in $ports; do
             local rule="rule family=ipv6 destination address=$a/128 port port=$p protocol=tcp accept"
             firewall-cmd -q --permanent --"$verb"-rich-rule="$rule" 2>/dev/null || true
         done
         firewall-cmd -q --reload
-        echo "  firewalld: $PORTS $([ "$verb" = add ] && echo open to $a only || echo closed again)"
+        [ "$verb" = add ] && echo "  firewalld: $ports open to $a only"
     elif command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        for p in $PORTS; do
+        for p in $ports; do
             if [ "$verb" = add ]; then ufw allow to "$a" port "$p" proto tcp >/dev/null
             else ufw delete allow to "$a" port "$p" proto tcp >/dev/null 2>&1 || true; fi
         done
-        echo "  ufw: $PORTS $([ "$verb" = add ] && echo open to $a only || echo closed again)"
+        [ "$verb" = add ] && echo "  ufw: $ports open to $a only"
     fi
+    return 0
+}
+
+# config_meshes: the meshes an existing config runs on, one a line.
+config_meshes() {
+    python3 -c 'import json,sys
+c=json.load(open(sys.argv[1]))
+print("\n".join(c.get("meshes") or ([c["mesh"]] if c.get("mesh") else [])))' "$1" 2>/dev/null || true
+}
+
+# close_all CONFIG: the firewall rules for every mesh it ran on.
+close_all() {
+    local i=0 m a
+    while read -r m; do
+        [ -n "$m" ] || continue
+        a=$(mesh_addr "$m" || true)
+        [ -n "$a" ] && firewall remove "$a" "$API_PORT $(node_port $i)"
+        i=$((i + 1))
+    done < <(config_meshes "$1")
 }
 
 if [ $UNINSTALL -eq 1 ]; then
@@ -127,11 +154,9 @@ if [ $UNINSTALL -eq 1 ]; then
     systemctl disable --now shrooms-backup 2>/dev/null || true
     rm -f /etc/systemd/system/shrooms-backup.service
     systemctl daemon-reload
-    if [ -f /etc/shrooms-backup/config.json ]; then
-        m=$(python3 -c 'import json;print(json.load(open("/etc/shrooms-backup/config.json"))["mesh"])' 2>/dev/null || true)
-        a=$([ -n "$m" ] && mesh_addr "$m" || true)
-        [ -n "$a" ] && firewall remove "$a"
-    fi
+    for f in /etc/shrooms-backup/config.json.firewall /etc/shrooms-backup/config.json; do
+        [ -f "$f" ] && { close_all "$f"; rm -f /etc/shrooms-backup/config.json.firewall; echo "  firewall rules closed"; break; }
+    done
     rm -f /usr/local/bin/shrooms-backup
     echo "  kept: /etc/shrooms-backup (the config and the key: the key is the only way to read this"
     echo "  machine's backups), /var/lib/shrooms-backup (copies kept for others), restic, logos-storage"
@@ -141,36 +166,59 @@ fi
 echo "==> checking this machine"
 [ -S "$SOCK" ] || { echo "  no shrooms daemon here: install shrooms first (scripts/install.sh)"; exit 1; }
 command -v python3 >/dev/null || { echo "  needs python3"; exit 1; }
-# Without --mesh: the one mesh this machine is on, or the one its mirrors
-# are all on. Never simply the first: on the laptop that was "default",
-# where no mirror is, and its backups and the apps could not reach it
-# (2026-11-02).
-if [ -z "$MESH" ]; then
-    MESH=$(status | python3 -c 'import json,sys
+CONFIG=/etc/shrooms-backup/config.json
+OLD_MESHES=""
+[ -f "$CONFIG" ] && OLD_MESHES=$(config_meshes "$CONFIG" | paste -sd, -)
+# Installed before the rules were recorded: they were opened for this config.
+[ -f "$CONFIG" ] && [ ! -f "$CONFIG.firewall" ] && cp "$CONFIG" "$CONFIG.firewall"
+# Run again without --mesh, the meshes it ran on.
+[ -n "$MESHES" ] || MESHES=$OLD_MESHES
+# Without --mesh on a first install: the one mesh this machine is on, or the
+# one its mirrors are all on. Never simply the first: on the laptop that was
+# "default", where no mirror is, and its backups and the apps could not reach
+# it (2026-11-02).
+if [ -z "$MESHES" ]; then
+    MESHES=$(status | python3 -c 'import json,sys
 st=json.load(sys.stdin); want=[m for m in sys.argv[1].split(",") if m]
 ms=[m["label"] for m in st.get("meshes") or [] if m.get("overlay") and not m.get("disabled")]
 if len(ms)==1: print(ms[0]); sys.exit()
 on=lambda l: {p["name"] for p in st.get("peers") or [] if p.get("mesh")==l}
 fit=[l for l in ms if want and set(want) <= on(l)]
 print(fit[0] if len(fit)==1 else "")' "$MIRRORS")
-    [ -n "$MESH" ] || { echo "  which mesh do backups run on? This machine is on several; give --mesh LABEL (the one its mirrors are on)"; exit 2; }
+    [ -n "$MESHES" ] || { echo "  which meshes do backups run on? This machine is on several; give --mesh A[,B] (the one its mirrors are on first)"; exit 2; }
 fi
-ADDR=$(mesh_addr "$MESH")
-[ -n "$ADDR" ] || { echo "  not on mesh \"$MESH\""; exit 1; }
+IFS=, read -ra MESH_LIST <<< "$MESHES"
+on_some=0
+for m in "${MESH_LIST[@]}"; do
+    a=$(mesh_addr "$m")
+    if [ -n "$a" ]; then echo "  on mesh $m at $a"; on_some=1
+    else echo "  not on mesh \"$m\" (yet): the daemon serves the others and starts again when it joins"; fi
+done
+[ $on_some -eq 1 ] || { echo "  not on any of: $MESHES"; exit 1; }
 NSRC=$(( ${#SOURCES[@]} + ${#PRESETS[@]} ))
 # Run again on a machine already set up, it changes only what it is given
 # and keeps the rest of the config (and so whatever the apps set): having to
 # repeat every option to move the laptop to another mesh was confusing.
-CONFIG=/etc/shrooms-backup/config.json
 if [ ! -f "$CONFIG" ]; then
     [ $NSRC -gt 0 ] || [ "$MIRROR" = true ] || { echo "  nothing to do: --mirror, or --preset/--source with --mirrors"; usage 2; }
     [ $NSRC -eq 0 ] || [ -n "$MIRRORS" ] || { echo "  a source needs --mirrors"; exit 2; }
-else
-    OLD_MESH=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("mesh",""))' "$CONFIG" 2>/dev/null || true)
-    [ -n "$MESH" ] || MESH=$OLD_MESH
+fi
+# The mesh a source backs up over: the first of them its mirrors are all on
+# (its copies are fetched from its node there).
+SRC_MIRRORS=$MIRRORS
+[ -n "$SRC_MIRRORS" ] || [ ! -f "$CONFIG" ] || SRC_MIRRORS=$(python3 -c 'import json,sys
+print(",".join((json.load(open(sys.argv[1])).get("source") or {}).get("mirrors") or []))' "$CONFIG" 2>/dev/null || true)
+SOURCE_MESH=""
+if [ -n "$SRC_MIRRORS" ]; then
+    SOURCE_MESH=$(status | python3 -c 'import json,sys
+st=json.load(sys.stdin); want=[m for m in sys.argv[1].split(",") if m]
+on=lambda l: {p["name"] for p in st.get("peers") or [] if p.get("mesh")==l}
+fit=[l for l in sys.argv[2].split(",") if set(want) <= on(l)]
+print(fit[0] if fit else "")' "$SRC_MIRRORS" "$MESHES")
+    [ -n "$SOURCE_MESH" ] || { echo "  no one of $MESHES has all of $SRC_MIRRORS on it: a source's mirrors must share a mesh with it"; exit 2; }
+    echo "  backs up over $SOURCE_MESH, the mesh its mirrors ($SRC_MIRRORS) are on"
 fi
 ARCH=$(uname -m); case $ARCH in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
-echo "  on mesh $MESH at $ADDR ($ARCH)"
 
 # Both programs come out of one image, unless both are given: logos-storage
 # came from a server on our office mesh once, and a machine on any other mesh
@@ -228,17 +276,18 @@ command -v restorecon >/dev/null && restorecon /usr/local/lib/shrooms-backup/log
 echo "==> the config"
 install -d -m 0700 /etc/shrooms-backup
 [ -n "$QUOTA" ] || QUOTA=10
-python3 - "$MESH" "$MIRROR" "$ALWAYS" "$OWNERS" "$QUOTA" "$MIRRORS" "$TIMES" "$KEEP_LOCAL" \
+python3 - "$MESHES" "$MIRROR" "$ALWAYS" "$OWNERS" "$QUOTA" "$MIRRORS" "$TIMES" "$KEEP_LOCAL" \
     "$(printf '%s\n' "${SOURCES[@]+"${SOURCES[@]}"}")" "$(printf '%s\n' "${EXCLUDES[@]+"${EXCLUDES[@]}"}")" \
-    "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" "$GIVEN" <<'PY'
+    "$(printf '%s\n' "${PRESETS[@]+"${PRESETS[@]}"}")" "$GIVEN" "$SOURCE_MESH" <<'PY'
 import json, os, sys
-mesh, mirror, always, owners, quota, mirrors, times, keep, sources, excludes, presets, given = sys.argv[1:]
+meshes, mirror, always, owners, quota, mirrors, times, keep, sources, excludes, presets, given, source_mesh = sys.argv[1:]
 given = set(given.split())
 lst = lambda s, sep=",": [x.strip() for x in s.split(sep) if x.strip()]
 path = "/etc/shrooms-backup/config.json"
 old = json.load(open(path)) if os.path.exists(path) else None
 c = old or {"mirror": False, "always_on": False, "owners": [], "node": {}, "restic": "/usr/local/bin/restic"}
-c["mesh"] = mesh
+c["meshes"] = lst(meshes)
+c["mesh"] = c["meshes"][0]
 if old is None or "mirror" in given: c["mirror"] = mirror == "true"
 if old is None or "always" in given: c["always_on"] = always == "true"
 if old is None or "owners" in given: c["owners"] = lst(owners)
@@ -253,6 +302,9 @@ if s is not None:
     if "times" in given or not s.get("times"): s["times"] = lst(times)
     if "keep" in given: s["keep_local"] = True
     if not s["mirrors"]: sys.exit("  a source needs --mirrors")
+    # Over its mirrors' mesh; the primary is the default and written as none.
+    if source_mesh and source_mesh != c["meshes"][0]: s["mesh"] = source_mesh
+    else: s.pop("mesh", None)
     c["source"] = s
 json.dump(c, open(path, "w"), indent=2)
 print("  " + ", ".join(filter(None, ["a mirror" if c["mirror"] else "",
@@ -261,11 +313,17 @@ PY
 chmod 600 /etc/shrooms-backup/config.json
 
 echo "==> the firewall"
-if [ -n "${OLD_MESH:-}" ] && [ "$OLD_MESH" != "$MESH" ]; then
-    a=$(mesh_addr "$OLD_MESH" || true)
-    [ -n "$a" ] && firewall remove "$a"
-fi
-firewall add "$ADDR"
+# What it opened before, then what it needs now: a mesh left, or the order
+# changed (a node's port follows its place), leaves nothing open behind.
+[ -n "$OLD_MESHES" ] && [ -f "$CONFIG.firewall" ] && close_all "$CONFIG.firewall"
+i=0
+for m in "${MESH_LIST[@]}"; do
+    a=$(mesh_addr "$m")
+    [ -n "$a" ] && firewall add "$a" "$API_PORT $(node_port $i)"
+    i=$((i + 1))
+done
+# What the rules were made for, so the next run closes exactly those.
+cp "$CONFIG" "$CONFIG.firewall"
 
 echo "==> the service"
 cat > /etc/systemd/system/shrooms-backup.service <<'EOF'

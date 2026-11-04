@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -39,7 +40,7 @@ func (d *Daemon) labels() map[string]string {
 // labelKey labels the key the daemon uses now. Before the repository exists
 // there is no key ID yet; the label waits for the first run, which makes it.
 func (d *Daemon) labelKey(ctx context.Context, label string) {
-	if _, ok := d.self.Map().Objects["config"]; !ok {
+	if !d.repoMade() {
 		os.WriteFile(filepath.Join(d.State, "key-label-pending"), []byte(label), 0o600)
 		return
 	}
@@ -99,7 +100,7 @@ func (d *Daemon) getKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"keys": []KeyInfo{}})
 		return
 	}
-	if _, ok := d.self.Map().Objects["config"]; !ok {
+	if !d.repoMade() {
 		writeJSON(w, 200, map[string]any{"keys": []KeyInfo{}, "pending": true})
 		return
 	}
@@ -170,7 +171,7 @@ func (d *Daemon) putKey(w http.ResponseWriter, r *http.Request) {
 	if body.Label != "" {
 		d.labelKey(r.Context(), body.Label)
 	}
-	if _, ok := d.self.Map().Objects["config"]; ok {
+	if d.repoMade() {
 		d.refreshKeys(r.Context())
 	}
 	d.Log.Info("key set", "by", callerOf(r).name, "how", how)
@@ -199,11 +200,14 @@ func (d *Daemon) SetKey(ctx context.Context, k string) (string, error) {
 	if strings.TrimSpace(string(old)) == k {
 		return "same", nil
 	}
+	if d.self == nil {
+		return "", fmt.Errorf("this machine is not on the %s mesh, which it backs up over", d.Cfg.SourceMesh())
+	}
 	// A repository not made yet has nothing encrypted with the old key.
-	if _, ok := d.self.Map().Objects["config"]; !ok {
+	if !d.repoMade() {
 		return "set", writeKey(d.Key, k)
 	}
-	if err := d.nodeReady(ctx); err != nil {
+	if err := d.nodeReady(ctx, d.Cfg.SourceMesh()); err != nil {
 		return "", err
 	}
 	tmp := d.Key + ".new"
