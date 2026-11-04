@@ -51,7 +51,10 @@ jobs:
           make -j4 update
           make -j4 NIMFLAGS="-d:disableMarchNative"
           cp build/storage ../logos-storage-${{ matrix.arch }}
-      - run: ./logos-storage-${{ matrix.arch }} --version | grep -q "revision: ${STORAGE_COMMIT:0:7}"
+      - name: the pinned revision
+        run: |
+          ./logos-storage-${{ matrix.arch }} --version
+          ./logos-storage-${{ matrix.arch }} --version | grep -q "revision: ${STORAGE_COMMIT:0:7}"
       - uses: actions/upload-artifact@v4
         with:
           name: logos-storage-${{ matrix.arch }}
