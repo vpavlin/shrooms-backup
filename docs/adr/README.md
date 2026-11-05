@@ -14,3 +14,5 @@
 | [010](010-logos-storage-ships-in-the-image.md) | logos-storage ships in the image, built by CI from the pinned commit; nothing an install needs comes from a mesh | accepted |
 | [011](011-backups-on-several-meshes.md) | Backups on several meshes: a node per mesh, names qualified by mesh, one limit for the machine | accepted; built |
 | [012](012-a-run-shows-its-progress-and-waits-while-it-moves.md) | A run shows its progress, and waits for a mirror as long as it moves | accepted; built |
+| [013](013-mirrors-fetch-past-gaps-patched-storage.md) | Mirrors fetch past what they cannot find yet; storage patched for many manifests | accepted; built — logos-storage pinned to vpavlin/nim-codex@0f3e5cf |
+| [014](014-mirrors-over-restics-rest-protocol.md) | Mirrors over restic's REST protocol, pushed by the source; Logos Storage a tier of its own | accepted; built — mirrors are restic repositories in directories, sources stream to them; update mirrors before sources |

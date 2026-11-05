@@ -69,20 +69,28 @@ func TestASourceAndItsMirror(t *testing.T) {
 	if run.Files != 10 || run.FilesNew != 10 || run.Bytes < 500000 || run.DataAdded == 0 || run.Stored == 0 {
 		t.Errorf("run's numbers: %+v", run)
 	}
-	if n := net.node("laptop").count(); n != 0 {
-		t.Errorf("the source kept %d objects after every mirror had them", n)
+	// The mirror's copy holds the whole repository (ADR-014), and the
+	// source lets the data go once it does.
+	copyOf := p.mirrors[mirrorKey("office", "laptop")]
+	if copyOf == nil {
+		t.Fatal("the mirror keeps no copy of laptop")
 	}
+	held := copyOf.store.Keys()
 	live := 0
-	for _, o := range l.self.Map().Objects {
-		if o.Deleted == nil {
-			live++
-			if !net.node("proteus").Has(ctx, o.CID, o.Size) {
-				t.Errorf("%s not on the mirror", o.CID)
-			}
+	for k, n := range l.src.catalog {
+		live++
+		if held[k] != n {
+			t.Errorf("%s: the mirror has %d bytes, the source %d", k, held[k], n)
 		}
 	}
 	if live == 0 {
 		t.Fatal("nothing was backed up")
+	}
+	for i := 0; i < 50 && len(l.src.spool.List("data")) > 0; i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if n := len(l.src.spool.List("data")); n != 0 {
+		t.Errorf("the source kept %d packs after every mirror had them", n)
 	}
 
 	// A second run, after a change: it reads the repository back from the

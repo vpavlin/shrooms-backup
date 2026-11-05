@@ -33,8 +33,11 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      STORAGE_REPO: logos-storage/logos-storage-nim
-      STORAGE_COMMIT: be9807ff34943e205e9a780d31d78089efe38a19
+      # be9807f plus two patches by jimmy-crib/vpavlin (ADR-013): provider
+      # records for 20,000 keys, not 500; a manifest asked of connected peers
+      # when the DHT names none. Back to upstream once it takes them.
+      STORAGE_REPO: vpavlin/nim-codex
+      STORAGE_COMMIT: 0f3e5cff37c08f2dc32fb6ebdb6c1dd9921fffb8
     steps:
       - id: cache
         uses: actions/cache@v4

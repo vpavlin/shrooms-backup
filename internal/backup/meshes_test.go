@@ -279,7 +279,11 @@ func TestASourceOnItsSecondMesh(t *testing.T) {
 	if !slices.Equal(in.Holds, []string{"k11@home"}) || in.Held[0].Mesh != "home" {
 		t.Errorf("the mirror holds %v", in.Held)
 	}
-	if net_.node("scribe-home").count() == 0 || net_.node("scribe-office").count() != 0 {
-		t.Error("the copy is not in the home store alone")
+	// Kept under its mesh, as a plain restic repository (ADR-014).
+	if fi, err := os.Stat(filepath.Join(s.State, "mirrors", "home", "k11", "repo", "config")); err != nil || fi.Size() == 0 {
+		t.Errorf("the copy is not under home: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.State, "mirrors", "office", "k11")); err == nil {
+		t.Error("a copy under office too")
 	}
 }
