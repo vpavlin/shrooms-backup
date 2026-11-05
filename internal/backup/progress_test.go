@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 // restic's progress lines go to the run's progress, the rest is kept for the
@@ -28,5 +29,28 @@ func TestResticProgressLines(t *testing.T) {
 	var run Run
 	if !summarize(out.String(), &run) || run.FilesNew != 10 {
 		t.Errorf("the summary was lost: %+v", run)
+	}
+}
+
+// A mirror's rate is over the last minutes of sending, with the time left
+// at it; too short a window says nothing rather than something wild.
+func TestARateAndTimeLeft(t *testing.T) {
+	s := &SourceRepo{senders: map[string]*sender{}}
+	now := time.Now()
+	s.senders["scribe"] = &sender{sent: []sample{{now.Add(-10 * time.Second), 0}, {now, 100 << 20}}}
+	if r := s.Rate("scribe"); r != 0 {
+		t.Errorf("a rate from 10 s: %v", r)
+	}
+	s.senders["scribe"].sent = []sample{{now.Add(-100 * time.Second), 0}, {now.Add(-50 * time.Second), 150e6}, {now, 150e6}}
+	r := s.Rate("scribe")
+	if r < 2.9e6 || r > 3.1e6 {
+		t.Errorf("rate %v, want about 3 MB/s", r)
+	}
+	mp := withRate(MirrorProgress{Bytes: 150e9, Done: 30e9}, r, 120e9)
+	if mp.Rate < 2.9e6 || mp.SecondsLeft < 38000 || mp.SecondsLeft > 42000 {
+		t.Errorf("%+v", mp)
+	}
+	if mp := withRate(MirrorProgress{}, 0, 5); mp.Rate != 0 || mp.SecondsLeft != 0 {
+		t.Errorf("no rate, yet %+v", mp)
 	}
 }

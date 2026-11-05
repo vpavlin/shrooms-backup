@@ -29,6 +29,14 @@ type Store struct {
 	mu    sync.Mutex
 	size  int64             // bytes in live and held objects
 	locks map[string][]byte // restic's locks: mutable, never kept
+	wrote time.Time         // the last write that kept something
+}
+
+// Wrote is when the store last kept an object.
+func (s *Store) Wrote() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wrote
 }
 
 // ErrNoRoom is what a write past a quota gets.
@@ -147,7 +155,7 @@ func (s *Store) Put(key string, r io.Reader, size int64, room func(int64) error)
 	if err := os.Rename(tmp.Name(), p); err != nil {
 		return err
 	}
-	s.size += n
+	s.size, s.wrote = s.size+n, time.Now()
 	// Written again after a delete: the held copy is the same bytes.
 	if hp, err := s.path(key, true); err == nil {
 		if fi, err := os.Stat(hp); err == nil && os.Remove(hp) == nil {

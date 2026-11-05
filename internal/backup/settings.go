@@ -55,7 +55,7 @@ func (d *Daemon) putConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if next.Mirror || next.Node.QuotaGB != d.Cfg.Node.QuotaGB {
-		_, held := d.space(r.Context())
+		held := d.heldBytes()
 		if err := checkQuota(d.State, next.Node.QuotaGB, held); err != nil {
 			fail(w, http.StatusBadRequest, err)
 			return

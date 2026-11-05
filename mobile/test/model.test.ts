@@ -114,6 +114,8 @@ t("a run's progress: reading, then each mirror", () => {
   assert.deepEqual(m.progressBars(info("k11", { running: false })), []);
   assert.deepEqual(m.progressBars(info("k11", { running: false, progress: { phase: "catching up", mirrors: { scribe: { bytes: 150e9, done: 30e9 } } } })).map((b) => [b.label, b.fraction]),
     [["scribe: catching up, 30 GB of 150 GB", 0.2]]);
+  assert.deepEqual(m.progressBars(info("k11", { progress: { phase: "catching up", mirrors: { scribe: { bytes: 150e9, done: 30e9, rate: 3.1e6, seconds_left: 38700 } } } }))[0].label,
+    "scribe: catching up, 30 GB of 150 GB · 3.1 MB/s, about 11 h left");
   assert.deepEqual(m.progressBars(info("k11", { running: true, progress: { phase: "reading" } })), [{ label: "Reading files…", fraction: 0, tone: "busy" }]);
   const r = m.progressBars(info("k11", { running: true, progress: { phase: "reading", bytes: 150e9, bytes_done: 37.5e9, seconds_remaining: 7200 } }));
   assert.deepEqual(r, [{ label: "Reading files: 38 GB of 150 GB, about 2.0 h left", fraction: 0.25, tone: "busy" }]);
@@ -124,6 +126,13 @@ t("a run's progress: reading, then each mirror", () => {
   assert.equal(m.left(30), "under a minute");
   assert.equal(m.left(25 * 60), "about 25 min");
   assert.equal(m.left(11 * 3600), "about 11 h");
+});
+
+t("a copy still arriving says so, not in step", () => {
+  const h = { source: "k11@home", adopted: 0, pending: 0, missing: 0, bytes: 3.1e9, receiving: true };
+  assert.equal(m.copyText(h), "receiving, 3.1 GB so far");
+  assert.equal(m.copyTone(h), "warn");
+  assert.equal(m.copyText({ ...h, receiving: false }), "in step (3.1 GB)");
 });
 
 t("bars", () => {
