@@ -308,7 +308,7 @@ if s is not None:
     c["source"] = s
 json.dump(c, open(path, "w"), indent=2)
 print("  " + ", ".join(filter(None, ["a mirror" if c["mirror"] else "",
-      ("a source of " + " ".join(c["source"]["presets"] + c["source"]["paths"]) + " to " + ", ".join(c["source"]["mirrors"])) if "source" in c else ""])))
+      ("a source of " + " ".join(c["source"].get("presets", []) + c["source"].get("paths", [])) + " to " + ", ".join(c["source"]["mirrors"])) if "source" in c else ""])))
 PY
 chmod 600 /etc/shrooms-backup/config.json
 
