@@ -21,8 +21,8 @@ Item {
                      owner: false, holds: ["jimmy-crib"], held: [{ source: "jimmy-crib", adopted: 9, pending: 9, missing: 0, bytes: 40569511 }] },
         "fd00::3": { name: "vps", mirror: true, always_on: true, quota: 42949672960, used: 40372402, quota_gb: 40, owners: [],
                      owner: true, holds: ["jimmy-crib"], held: [{ source: "jimmy-crib", adopted: 8, pending: 9, missing: 3, bytes: 40372402 }] },
-        "fd00::4": { name: "atlas", mirror: false, always_on: true, quota: 0, used: 0, owner: true, holds: [], held: [], running: true,
-                     progress: { phase: "mirrors", mirrors: { scribe: { bytes: 150000000000, done: 37000000000 } } },
+        "fd00::4": { name: "atlas", mirror: false, always_on: true, quota: 0, used: 0, owner: true, holds: [], held: [], running: false,
+                     progress: { phase: "catching up", mirrors: { scribe: { bytes: 150000000000, done: 37000000000 } } },
                      source: { presets: ["agents"], times: ["04:00"], mirrors: ["scribe"], keep_daily: 14, keep_weekly: 12 },
                      last_run: { started: iso(300), finished: iso(299), ok: false, error: "no key (/etc/shrooms-backup/key)", mirrors: {} } }
     })

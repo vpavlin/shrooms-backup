@@ -621,3 +621,24 @@ func (b *bufferResponse) Write(p []byte) (int, error) { return b.buf.Write(p) }
 func (b *bufferResponse) WriteHeader(code int)        { b.code = code }
 
 var errNotSynced = errors.New("not in step")
+
+// catchingUp is the senders' progress between runs, when a mirror lacks
+// something; nil when every mirror holds the repository.
+func (s *SourceRepo) catchingUp(mirrors []string) *Progress {
+	total := s.Size()
+	p := &Progress{Phase: "catching up", Mirrors: map[string]MirrorProgress{}}
+	behind := false
+	for _, m := range mirrors {
+		left, synced, why, _ := s.Pending(m)
+		if synced {
+			p.Mirrors[m] = MirrorProgress{Bytes: total, Done: total, OK: true}
+			continue
+		}
+		behind = true
+		p.Mirrors[m] = MirrorProgress{Bytes: total, Done: max(total-left, 0), Error: why}
+	}
+	if !behind {
+		return nil
+	}
+	return p
+}

@@ -272,10 +272,14 @@ export function left(seconds: number): string {
 
 export interface Bar { label: string; fraction: number; tone: Tone }
 
-/** The bars for a run under way: one while restic reads, then one a mirror. None when nothing runs. */
+/**
+ * The bars for a run under way (one while restic reads, then one a mirror), or for mirrors still being
+ * caught up between runs ("catching up": a source streams to its mirrors all the time, ADR-014). None when
+ * every mirror holds everything.
+ */
 export function progressBars(i: Info): Bar[] {
   const p = i.progress;
-  if (!i.running || !p) return [];
+  if (!p) return [];
   if (p.phase === "reading") {
     if (!p.bytes) return [{ label: "Reading files…", fraction: 0, tone: "busy" }];
     const rest = p.seconds_remaining ? `, ${left(p.seconds_remaining)} left` : "";
@@ -284,6 +288,7 @@ export function progressBars(i: Info): Bar[] {
   return Object.entries(p.mirrors || {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, mp]) => {
     if (mp.error) return { label: `${name}: ${mp.error}`, fraction: mp.bytes ? mp.done / mp.bytes : 0, tone: "bad" as Tone };
     if (mp.ok) return { label: `${name}: holds this run`, fraction: 1, tone: "ok" as Tone };
-    return { label: `${name}: ${size(mp.done)} of ${size(mp.bytes)}`, fraction: mp.bytes ? Math.min(mp.done / mp.bytes, 1) : 0, tone: "busy" as Tone };
+    const lead = p.phase === "catching up" ? "catching up, " : "";
+    return { label: `${name}: ${lead}${size(mp.done)} of ${size(mp.bytes)}`, fraction: mp.bytes ? Math.min(mp.done / mp.bytes, 1) : 0, tone: "busy" as Tone };
   });
 }

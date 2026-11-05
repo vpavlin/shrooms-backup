@@ -111,7 +111,9 @@ t("mirrors to choose from", () => {
 });
 
 t("a run's progress: reading, then each mirror", () => {
-  assert.deepEqual(m.progressBars(info("k11", { running: false, progress: { phase: "reading" } })), []);
+  assert.deepEqual(m.progressBars(info("k11", { running: false })), []);
+  assert.deepEqual(m.progressBars(info("k11", { running: false, progress: { phase: "catching up", mirrors: { scribe: { bytes: 150e9, done: 30e9 } } } })).map((b) => [b.label, b.fraction]),
+    [["scribe: catching up, 30 GB of 150 GB", 0.2]]);
   assert.deepEqual(m.progressBars(info("k11", { running: true, progress: { phase: "reading" } })), [{ label: "Reading files…", fraction: 0, tone: "busy" }]);
   const r = m.progressBars(info("k11", { running: true, progress: { phase: "reading", bytes: 150e9, bytes_done: 37.5e9, seconds_remaining: 7200 } }));
   assert.deepEqual(r, [{ label: "Reading files: 38 GB of 150 GB, about 2.0 h left", fraction: 0.25, tone: "busy" }]);
