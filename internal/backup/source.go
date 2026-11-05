@@ -49,6 +49,38 @@ type sender struct {
 	have  map[string]int64
 	err   string
 	moved time.Time
+	// sent is what went out lately, for a rate: (when, bytes), the last
+	// rateWindow of it.
+	sent []sample
+}
+
+type sample struct {
+	at time.Time
+	n  int64
+}
+
+// rateWindow is what a sending rate averages over.
+var rateWindow = 5 * time.Minute
+
+// Rate is what goes to a mirror, in bytes a second, over the last few
+// minutes; 0 while that is too little to say (under 30 s of it).
+func (s *SourceRepo) Rate(mirror string) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	se, ok := s.senders[mirror]
+	if !ok || len(se.sent) == 0 {
+		return 0
+	}
+	since := se.sent[0].at
+	span := time.Since(since)
+	if span < 30*time.Second {
+		return 0
+	}
+	var n int64
+	for _, x := range se.sent {
+		n += x.n
+	}
+	return float64(n) / span.Seconds()
 }
 
 // OpenSource opens a source's repository in dir, with the pre-ADR-014
@@ -557,7 +589,17 @@ func (s *SourceRepo) sendOne(ctx context.Context, se *sender, repo, key string) 
 		return fmt.Errorf("%s refused %s: %s %s", se.mirror, key, resp.Status, strings.TrimSpace(string(msg)))
 	}
 	s.mu.Lock()
-	se.have[key], se.moved, se.err = size, time.Now(), ""
+	now := time.Now()
+	se.have[key], se.moved, se.err = size, now, ""
+	// The window starts at the first send in it: a rate from a mirror that
+	// was idle an hour is about this transfer, not the hour.
+	if len(se.sent) == 0 {
+		se.sent = append(se.sent, sample{now, 0})
+	}
+	se.sent = append(se.sent, sample{now, size})
+	for len(se.sent) > 1 && now.Sub(se.sent[0].at) > rateWindow {
+		se.sent = se.sent[1:]
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -635,10 +677,19 @@ func (s *SourceRepo) catchingUp(mirrors []string) *Progress {
 			continue
 		}
 		behind = true
-		p.Mirrors[m] = MirrorProgress{Bytes: total, Done: max(total-left, 0), Error: why}
+		p.Mirrors[m] = withRate(MirrorProgress{Bytes: total, Done: max(total-left, 0), Error: why}, s.Rate(m), left)
 	}
 	if !behind {
 		return nil
 	}
 	return p
+}
+
+// withRate adds the rate and, from it, the time left.
+func withRate(mp MirrorProgress, rate float64, left int64) MirrorProgress {
+	if rate > 0 {
+		mp.Rate = int64(rate)
+		mp.SecondsLeft = int64(float64(left) / rate)
+	}
+	return mp
 }

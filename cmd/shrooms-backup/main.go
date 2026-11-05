@@ -246,6 +246,12 @@ func status() error {
 		} else {
 			for name, m := range p.Mirrors {
 				state := fmt.Sprintf("%s of %s", size(m.Done), size(m.Bytes))
+				if m.Rate > 0 {
+					state += fmt.Sprintf(", %s/s", size(m.Rate))
+					if m.SecondsLeft > 0 {
+						state += fmt.Sprintf(", about %s left", (time.Duration(m.SecondsLeft) * time.Second).Round(time.Minute))
+					}
+				}
 				if m.OK {
 					state = "holds this run"
 				} else if m.Error != "" {

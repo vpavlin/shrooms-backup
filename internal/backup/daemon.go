@@ -685,10 +685,14 @@ type Progress struct {
 
 // MirrorProgress is how much of a run one mirror holds.
 type MirrorProgress struct {
-	Bytes int64  `json:"bytes"`
-	Done  int64  `json:"done"`
-	OK    bool   `json:"ok,omitempty"` // it holds the run
-	Error string `json:"error,omitempty"`
+	Bytes int64 `json:"bytes"`
+	Done  int64 `json:"done"`
+	// Rate is bytes a second over the last minutes, and SecondsLeft what
+	// is left at that rate; 0 while there is too little to say.
+	Rate        int64  `json:"rate,omitempty"`
+	SecondsLeft int64  `json:"seconds_left,omitempty"`
+	OK          bool   `json:"ok,omitempty"` // it holds the run
+	Error       string `json:"error,omitempty"`
 }
 
 func (d *Daemon) setProgress(f func(p *Progress)) {
@@ -709,7 +713,11 @@ func (d *Daemon) Info(ctx context.Context, mesh string) Info {
 	if st, ok := d.storeOf(mesh).(*Storage); ok {
 		in.SPR, _ = st.SPR(ctx)
 	}
-	in.Quota, in.Used = d.space(ctx)
+	// What the copies kept for others take (a copy still in a node counts
+	// by its map: mirrorCopy.size), against the machine's quota. The nodes'
+	// own counters missed the copies in stores (ADR-014): scribe said 944 MB
+	// while holding 3 GB of k11 alone.
+	in.Quota, in.Used = d.quotaBytes(), d.heldBytes()
 	d.mu.Lock()
 	in.Mirror, in.AlwaysOn, in.QuotaGB, in.Source = d.Cfg.Mirror, d.Cfg.AlwaysOn, d.Cfg.Node.QuotaGB, d.Cfg.Source
 	in.Owners = append([]string{}, d.Cfg.Owners...)
@@ -876,9 +884,13 @@ type MirrorStatus struct {
 	Pending int64  `json:"pending"`
 	Missing int    `json:"missing"`
 	// MissingBytes is what the fetch still lacks of the pending map.
-	MissingBytes int64  `json:"missing_bytes"`
-	Error        string `json:"error,omitempty"`
-	Bytes        int64  `json:"bytes"` // the adopted copy's size, held deletions included
+	MissingBytes int64 `json:"missing_bytes"`
+	// Receiving: the source wrote to it in the last two minutes (ADR-014).
+	// A mirror cannot know how much more is coming; the source's progress
+	// says that.
+	Receiving bool   `json:"receiving,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Bytes     int64  `json:"bytes"` // the adopted copy's size, held deletions included
 }
 
 func (d *Daemon) mirrorStatus(mc *mirrorCopy) MirrorStatus {
@@ -886,7 +898,8 @@ func (d *Daemon) mirrorStatus(mc *mirrorCopy) MirrorStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return MirrorStatus{Source: d.Cfg.Qualified(mc.source, mc.mesh), Mesh: mc.mesh, Adopted: m.Version, Pending: mc.pending,
-		Missing: mc.missing, MissingBytes: mc.missingBytes, Error: mc.err, Bytes: mc.size()}
+		Missing: mc.missing, MissingBytes: mc.missingBytes, Error: mc.err, Bytes: mc.size(),
+		Receiving: time.Since(mc.store.Wrote()) < 2*time.Minute}
 }
 
 // copyFor is the copy a request names, if the caller may read it.
@@ -1518,7 +1531,7 @@ func (d *Daemon) waitMirrors(ctx context.Context, mirrors []string, run *Run) er
 			}
 			left, synced, why, moved := d.src.Pending(m)
 			d.setProgress(func(p *Progress) {
-				mp := MirrorProgress{Bytes: total, Done: max(total-left, 0), OK: synced, Error: why}
+				mp := withRate(MirrorProgress{Bytes: total, Done: max(total-left, 0), OK: synced, Error: why}, d.src.Rate(m), left)
 				if synced {
 					mp.Done, mp.Error = total, ""
 				}

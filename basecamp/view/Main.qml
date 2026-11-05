@@ -154,7 +154,7 @@ Item {
 
     // A run under way, as bars: restic reading, then each mirror fetching
     // (the daemon's progress; mobile/src/model.ts progressBars says the same).
-    function left(s) {
+    function timeLeft(s) {
         if (s < 60) return "under a minute"
         if (s < 90 * 60) return "about " + Math.round(s / 60) + " min"
         return "about " + (s / 3600).toFixed(s < 36000 ? 1 : 0) + " h"
@@ -165,7 +165,7 @@ Item {
         if (p.phase === "reading") {
             if (!p.bytes) return [{ label: "Reading files...", fraction: 0, colour: cSky }]
             return [{ label: "Reading files: " + size(p.bytes_done || 0) + " of " + size(p.bytes)
-                             + (p.seconds_remaining ? ", " + left(p.seconds_remaining) + " left" : ""),
+                             + (p.seconds_remaining ? ", " + timeLeft(p.seconds_remaining) + " left" : ""),
                       fraction: Math.min((p.bytes_done || 0) / p.bytes, 1), colour: cSky }]
         }
         var ms = p.mirrors || {}, out = []
@@ -173,7 +173,9 @@ Item {
             var m = ms[n], f = m.bytes ? Math.min(m.done / m.bytes, 1) : 0
             if (m.error) out.push({ label: n + ": " + m.error, fraction: f, colour: cRust })
             else if (m.ok) out.push({ label: n + ": holds this run", fraction: 1, colour: cPhosphor })
-            else out.push({ label: n + ": " + (p.phase === "catching up" ? "catching up, " : "") + size(m.done) + " of " + size(m.bytes), fraction: f, colour: cSky })
+            else out.push({ label: n + ": " + (p.phase === "catching up" ? "catching up, " : "") + size(m.done) + " of " + size(m.bytes)
+                                   + (m.rate ? " · " + size(m.rate) + "/s" + (m.seconds_left ? ", " + timeLeft(m.seconds_left) + " left" : "") : ""),
+                           fraction: f, colour: cSky })
         })
         return out
     }
@@ -240,12 +242,13 @@ Item {
         var s = c.status
         if (s.error) return s.error
         if (s.pending > s.adopted) return "fetching, " + s.missing + " objects to go"
+        if (s.receiving) return "receiving, " + size(s.bytes) + " so far"
         return "in step (" + size(s.bytes) + ")"
     }
     function copyColour(c) {
         var s = c.status
         if (s.error) return cRust
-        if (s.pending > s.adopted) return cAmber
+        if (s.pending > s.adopted || s.receiving) return cAmber
         return cPhosphor
     }
 

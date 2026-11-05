@@ -1,7 +1,7 @@
 {
   "name": "shrooms_backup",
   "display_name": "Shrooms Backup",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "ui_qml",
   "category": "network",
   "description": "Your machines' backups, kept by your other machines over Shrooms: what each backs up, where its copies are, how the runs went, and its settings. Needs Shrooms and shrooms_backup_core.",

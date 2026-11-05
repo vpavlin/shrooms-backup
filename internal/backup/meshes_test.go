@@ -287,3 +287,32 @@ func TestASourceOnItsSecondMesh(t *testing.T) {
 		t.Error("a copy under office too")
 	}
 }
+
+// A mirror counts its copies in what it uses, and a copy written in the
+// last minutes is receiving: scribe said 944 MB used, k11 "in step", while
+// 3 GB of k11 had arrived of 148 (2026-11-05).
+func TestAMirrorSaysWhatItHoldsAndWhatIsArriving(t *testing.T) {
+	mesh := &Mesh{}
+	mesh.SetPeers("scribe", []Peer{{Name: "k11", Mesh: "home", Overlay: "127.0.0.1"}})
+	cfg := &Config{Meshes: []string{"home"}, Mirror: true}
+	cfg.fill()
+	d := &Daemon{Cfg: cfg, State: t.TempDir(), Log: slog.New(slog.DiscardHandler), Mesh: mesh, Store: newNetwork().node("s")}
+	if err := d.Open(); err != nil {
+		t.Fatal(err)
+	}
+	mc, err := d.mirrorOf("home", "k11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("x", 5000)
+	if err := mc.store.Put("data/"+sha(body), strings.NewReader(body), 5000, nil); err != nil {
+		t.Fatal(err)
+	}
+	in := d.Info(context.Background(), "home")
+	if in.Used != 5000 || in.Quota != DefaultQuotaGB*GB {
+		t.Errorf("used %d of %d", in.Used, in.Quota)
+	}
+	if len(in.Held) != 1 || !in.Held[0].Receiving || in.Held[0].Bytes != 5000 {
+		t.Errorf("held %+v", in.Held)
+	}
+}

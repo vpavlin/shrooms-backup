@@ -12,7 +12,7 @@ export interface Source {
   presets?: string[]; paths?: string[]; exclude?: string[]; times?: string[]; mirrors?: string[];
   keep_local?: boolean; keep_daily?: number; keep_weekly?: number;
 }
-export interface Held { source: string; adopted: number; pending: number; missing: number; error?: string; bytes?: number }
+export interface Held { source: string; adopted: number; pending: number; missing: number; error?: string; bytes?: number; receiving?: boolean }
 export interface Info {
   name: string; mirror: boolean; always_on: boolean; quota: number; used: number; quota_gb?: number;
   owners?: string[]; source?: Source | null; last_run?: Run | null; running?: boolean; next?: string;
@@ -22,7 +22,8 @@ export interface Info {
 /** A run under way: restic reading ("reading"), then each mirror fetching ("mirrors"). */
 export interface Progress {
   phase: string; started?: string; files?: number; files_done?: number; bytes?: number; bytes_done?: number;
-  seconds_remaining?: number; mirrors?: Record<string, { bytes: number; done: number; ok?: boolean; error?: string }>;
+  seconds_remaining?: number;
+  mirrors?: Record<string, { bytes: number; done: number; ok?: boolean; error?: string; rate?: number; seconds_left?: number }>;
 }
 export interface Machine { name: string; base: string; info: Info }
 /** One of a source's keys, as its owners see it: never anything that opens it. */
@@ -144,11 +145,12 @@ export function copiesOf(name: string, ms: Machine[]): { mirror: string; status:
 export function copyText(h: Held): string {
   if (h.error) return h.error;
   if (h.pending > h.adopted) return `fetching, ${h.missing} objects to go`;
+  if (h.receiving) return `receiving, ${size(h.bytes)} so far`;
   return `in step (${size(h.bytes)})`;
 }
 export function copyTone(h: Held): Tone {
   if (h.error) return "bad";
-  if (h.pending > h.adopted) return "warn";
+  if (h.pending > h.adopted || h.receiving) return "warn";
   return "ok";
 }
 
@@ -289,6 +291,8 @@ export function progressBars(i: Info): Bar[] {
     if (mp.error) return { label: `${name}: ${mp.error}`, fraction: mp.bytes ? mp.done / mp.bytes : 0, tone: "bad" as Tone };
     if (mp.ok) return { label: `${name}: holds this run`, fraction: 1, tone: "ok" as Tone };
     const lead = p.phase === "catching up" ? "catching up, " : "";
-    return { label: `${name}: ${lead}${size(mp.done)} of ${size(mp.bytes)}`, fraction: mp.bytes ? Math.min(mp.done / mp.bytes, 1) : 0, tone: "busy" as Tone };
+    // The rate over the last minutes, and the time left at it (ADR-014).
+    const pace = mp.rate ? ` · ${size(mp.rate)}/s${mp.seconds_left ? `, ${left(mp.seconds_left)} left` : ""}` : "";
+    return { label: `${name}: ${lead}${size(mp.done)} of ${size(mp.bytes)}${pace}`, fraction: mp.bytes ? Math.min(mp.done / mp.bytes, 1) : 0, tone: "busy" as Tone };
   });
 }
