@@ -161,7 +161,7 @@ Item {
     }
     function progressBars(info) {
         var p = info ? info.progress : null
-        if (!info || !info.running || !p) return []
+        if (!info || !p) return []   // between runs too: mirrors still being caught up (ADR-014)
         if (p.phase === "reading") {
             if (!p.bytes) return [{ label: "Reading files...", fraction: 0, colour: cSky }]
             return [{ label: "Reading files: " + size(p.bytes_done || 0) + " of " + size(p.bytes)
@@ -173,7 +173,7 @@ Item {
             var m = ms[n], f = m.bytes ? Math.min(m.done / m.bytes, 1) : 0
             if (m.error) out.push({ label: n + ": " + m.error, fraction: f, colour: cRust })
             else if (m.ok) out.push({ label: n + ": holds this run", fraction: 1, colour: cPhosphor })
-            else out.push({ label: n + ": " + size(m.done) + " of " + size(m.bytes), fraction: f, colour: cSky })
+            else out.push({ label: n + ": " + (p.phase === "catching up" ? "catching up, " : "") + size(m.done) + " of " + size(m.bytes), fraction: f, colour: cSky })
         })
         return out
     }

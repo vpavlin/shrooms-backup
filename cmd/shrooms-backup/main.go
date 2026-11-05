@@ -251,7 +251,11 @@ func status() error {
 				} else if m.Error != "" {
 					state = m.Error
 				}
-				fmt.Printf("backing up: %s %s\n", name, state)
+				what := "backing up"
+				if p.Phase == "catching up" {
+					what = "catching up"
+				}
+				fmt.Printf("%s: %s %s\n", what, name, state)
 			}
 		}
 	}

@@ -76,6 +76,12 @@ func TestTheOldStagingMovesToTheMirror(t *testing.T) {
 	if !k.repoMade() {
 		t.Fatal("the catalog did not start from the old staging")
 	}
+	// Before any sender has sent anything, the mirror is behind, and says so
+	// outside any run.
+	k.src.Sync(ctx, []string{"scribe"})
+	if p := k.Info(ctx, "home").Progress; p == nil || p.Phase != "catching up" || p.Mirrors["scribe"].Bytes == 0 {
+		t.Errorf("catching up is not shown: %+v", p)
+	}
 	k.Start(ctx)
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -88,6 +94,9 @@ func TestTheOldStagingMovesToTheMirror(t *testing.T) {
 			t.Fatalf("the mirror never caught up: %s", why)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if p := k.Info(ctx, "home").Progress; p != nil {
+		t.Errorf("progress shown once the mirror holds everything: %+v", p)
 	}
 	// The mirror's copy is the backup: plain restic checks and reads it.
 	copyDir := filepath.Join(s.State, "mirrors", "home", "k11", "repo")

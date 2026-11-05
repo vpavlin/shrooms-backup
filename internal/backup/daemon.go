@@ -722,6 +722,7 @@ func (d *Daemon) Info(ctx context.Context, mesh string) Info {
 		}
 		in.Progress = &p
 	}
+	src := d.src
 	if in.Source != nil {
 		next := nextTime(time.Now(), in.Source.Times)
 		in.Next = &next
@@ -735,6 +736,14 @@ func (d *Daemon) Info(ctx context.Context, mesh string) Info {
 		in.LastRun = &last
 	}
 	d.mu.Unlock()
+	// Between runs, a mirror still being caught up: the senders work all the
+	// time (ADR-014), and k11's first 150 GB went to scribe outside any run,
+	// with nothing to show for it (2026-11-05).
+	if in.Progress == nil && src != nil && in.Source != nil {
+		if p := src.catchingUp(in.Source.Mirrors); p != nil {
+			in.Progress = p
+		}
+	}
 	for _, mc := range copies {
 		in.Held = append(in.Held, d.mirrorStatus(mc))
 	}
