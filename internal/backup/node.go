@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +52,23 @@ func NewNode(cfg NodeConfig, log *slog.Logger) *Node {
 // Storage is the node's API.
 func (n *Node) Storage() *Storage {
 	return &Storage{API: "http://127.0.0.1:" + strconv.Itoa(n.cfg.APIPort)}
+}
+
+// SetBootstrap sets the other nodes' SPRs for the node's next start, and
+// restarts it now only when restart says so.
+func (n *Node) SetBootstrap(sprs []string, restart bool) {
+	sprs = slices.Clone(sprs)
+	slices.Sort(sprs)
+	sprs = slices.Compact(sprs)
+	n.mu.Lock()
+	n.bootstrap = sprs
+	n.mu.Unlock()
+	if restart {
+		select {
+		case n.restart <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // Bootstrap sets the other nodes' SPRs, restarting the node when they
@@ -97,6 +116,10 @@ func (n *Node) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		cmd := exec.Command(n.cfg.Bin, n.args()...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+		// Its warnings, into the daemon's log: they went nowhere, and k11's
+		// mirror failing for hours had to be read from upstream's code.
+		out := &lineLog{log: n.log}
+		cmd.Stdout, cmd.Stderr = out, out
 		if err := cmd.Start(); err != nil {
 			n.log.Error("storage node: start", "bin", n.cfg.Bin, "err", err)
 			select {
@@ -155,4 +178,31 @@ func (n *Node) Ready(ctx context.Context, wait time.Duration) error {
 		}
 	}
 	return fmt.Errorf("the storage node did not answer within %v", wait)
+}
+
+// lineLog writes what a process prints into a logger, a line at a time.
+type lineLog struct {
+	log  *slog.Logger
+	mu   sync.Mutex
+	part []byte
+}
+
+func (l *lineLog) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.part = append(l.part, b...)
+	for {
+		i := bytes.IndexByte(l.part, '\n')
+		if i < 0 {
+			break
+		}
+		if line := strings.TrimSpace(string(l.part[:i])); line != "" {
+			l.log.Info("storage node says", "line", line)
+		}
+		l.part = l.part[i+1:]
+	}
+	if len(l.part) > 64<<10 { // a line that never ends
+		l.part = l.part[:0]
+	}
+	return len(b), nil
 }

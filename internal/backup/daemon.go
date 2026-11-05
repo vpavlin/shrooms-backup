@@ -487,18 +487,23 @@ func (d *Daemon) learnSPR(mesh, device, spr string) {
 	if d.sprs[mesh] == nil {
 		d.sprs[mesh] = map[string]string{}
 	}
-	changed := d.sprs[mesh][device] != spr
+	old := d.sprs[mesh][device]
+	if old == spr {
+		d.mu.Unlock()
+		return
+	}
+	// The newest SPR is kept, for the node's next start; the node restarts
+	// for it only when the peer or its addresses changed (sprIdentity).
+	moved := sprIdentity(old) != sprIdentity(spr)
 	d.sprs[mesh][device] = spr
 	all := make([]string, 0, len(d.sprs[mesh]))
 	for _, s := range d.sprs[mesh] {
 		all = append(all, s)
 	}
-	if changed {
-		d.saveSPRs()
-	}
+	d.saveSPRs()
 	d.mu.Unlock()
-	if n := d.nodeOf(mesh); changed && n != nil {
-		n.Bootstrap(all)
+	if n := d.nodeOf(mesh); n != nil {
+		n.SetBootstrap(all, moved)
 	}
 }
 
@@ -948,41 +953,14 @@ func (d *Daemon) fetchAll(ctx context.Context, mc *mirrorCopy, m Map) error {
 		return err
 	}
 	store := d.storeOf(mc.mesh)
-	var total int64
-	for _, size := range want {
-		total += size
-	}
-	d.mu.Lock()
-	mc.missing, mc.missingBytes = len(want), total
-	d.mu.Unlock()
-	// The node's fetch returns when the object is here, so this pass is
-	// where the time goes: what is left is said after each one, or a 150 GB
-	// first run would show nothing fetched until it was all fetched (seen
-	// in a real two-node run, 2026-11-04).
-	missing, left, seen := map[string]int64{}, total, 0
+	var mu sync.Mutex // guards missing, moved and lastErr, shared with the workers
+	missing := map[string]int64{}
 	for cid, size := range want {
-		seen++
-		if store.Has(ctx, cid, size) {
-			left -= size
-		} else {
+		if !store.Has(ctx, cid, size) {
 			missing[cid] = size
-			if err := store.Fetch(ctx, cid); err != nil {
-				return err
-			}
-			if store.Has(ctx, cid, size) {
-				delete(missing, cid)
-				left -= size
-			}
 		}
-		d.mu.Lock()
-		mc.missing, mc.missingBytes = len(want)-seen+len(missing), left
-		d.mu.Unlock()
 	}
-	// No fixed limit: 150 GB at 4-5 MiB/s is 9-10 hours, and 6 h failed a
-	// first run that was going fine (k11, 2026-11-04). Only a fetch that
-	// stops moving gives up.
-	moved, least := time.Now(), len(missing)
-	for len(missing) > 0 {
+	report := func() { // with mu held
 		var left int64
 		for _, size := range missing {
 			left += size
@@ -990,25 +968,85 @@ func (d *Daemon) fetchAll(ctx context.Context, mc *mirrorCopy, m Map) error {
 		d.mu.Lock()
 		mc.missing, mc.missingBytes = len(missing), left
 		d.mu.Unlock()
-		if len(missing) < least {
-			moved, least = time.Now(), len(missing)
+	}
+	report()
+
+	// Several at a time, and past what cannot be found yet. The node's
+	// fetch returns once the object is here, or after about 30 s when no
+	// peer says it has it: a manifest is found only through the DHT, and a
+	// node announces just its 500 most recent (libp2p's provided-key cap,
+	// found by jimmy-crib/vpavlin on k11's 9,500, 2026-11-05). Stopping at
+	// the first one not found started the pass over in another order, and
+	// fetched nothing for hours. What failed is tried again on the next pass.
+	moved := time.Now()
+	var lastErr error
+	for len(missing) > 0 {
+		mu.Lock()
+		cids := make([]string, 0, len(missing))
+		for cid := range missing {
+			cids = append(cids, cid)
+		}
+		mu.Unlock()
+		todo := make(chan string)
+		var wg sync.WaitGroup
+		for i := 0; i < FetchWorkers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for cid := range todo {
+					mu.Lock()
+					size := missing[cid]
+					mu.Unlock()
+					err := store.Fetch(ctx, cid)
+					got := store.Has(ctx, cid, size)
+					mu.Lock()
+					if got {
+						delete(missing, cid)
+						moved = time.Now()
+					} else if err != nil {
+						lastErr = err
+					}
+					report()
+					mu.Unlock()
+				}
+			}()
+		}
+	feed:
+		for _, cid := range cids {
+			select {
+			case todo <- cid:
+			case <-ctx.Done():
+				break feed
+			}
+		}
+		close(todo)
+		wg.Wait()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(missing) == 0 {
+			break
 		}
 		if time.Since(moved) > Stalled {
-			return fmt.Errorf("%d objects still missing, none fetched for %v", len(missing), Stalled)
+			return fmt.Errorf("%d objects still missing, none fetched for %v: %v", len(missing), Stalled, lastErr)
 		}
+		d.mu.Lock()
+		mc.err = fmt.Sprintf("%d objects not found yet, trying again: %v", len(missing), lastErr)
+		d.mu.Unlock()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-		for cid, size := range missing {
-			if store.Has(ctx, cid, size) {
-				delete(missing, cid)
-			}
+		case <-time.After(retryPause):
 		}
 	}
 	return nil
 }
+
+// FetchWorkers is how many objects a mirror fetches at once.
+var FetchWorkers = 8
+
+// retryPause is between passes over what could not be fetched yet.
+var retryPause = 20 * time.Second
 
 // repo serves a repository to restic, read-only: a mirror's copy of a
 // source, for the source itself or an owner restoring it.
