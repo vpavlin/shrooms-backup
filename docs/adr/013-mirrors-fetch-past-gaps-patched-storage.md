@@ -1,7 +1,8 @@
 # 013. Mirrors fetch past what they cannot find yet; storage patched for many manifests
 
-**Status:** accepted 2026-11-05; the daemon half built, the storage patches
-on their way (jimmy-crib/vpavlin).
+**Status:** accepted 2026-11-05; built. The storage patches are
+`vpavlin/nim-codex@0f3e5cf` (branch fix/manifest-fetch-capacity, one commit on
+be9807f), which CI builds.
 
 ## Context
 

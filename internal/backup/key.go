@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -200,8 +199,8 @@ func (d *Daemon) SetKey(ctx context.Context, k string) (string, error) {
 	if strings.TrimSpace(string(old)) == k {
 		return "same", nil
 	}
-	if d.self == nil {
-		return "", fmt.Errorf("this machine is not on the %s mesh, which it backs up over", d.Cfg.SourceMesh())
+	if d.src == nil {
+		return "", errors.New("this machine backs nothing up")
 	}
 	// A repository not made yet has nothing encrypted with the old key.
 	if !d.repoMade() {

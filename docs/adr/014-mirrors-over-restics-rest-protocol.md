@@ -1,6 +1,7 @@
 # 014. Mirrors over restic's REST protocol; Logos Storage a tier of its own
 
-**Status:** proposed 2026-11-05, for the owner's review. Supersedes how
+**Status:** accepted 2026-11-05 by the owner ("sounds good, let's do this");
+built. Supersedes how
 ADR-001 moves and keeps backups between a source and its mirrors; ADR-001's
 reasons for restic, keys and holds stand.
 
@@ -97,3 +98,22 @@ copies among your own machines.
   rather than as a slower filesystem between machines that know each other.
 - One more component, the spool and per-mirror queues, replaces the map and
   version handshake for mirrors. The map stays for the Logos Storage tier.
+
+## As built (2026-11-05)
+
+- **Mirror:** `Store` (store.go), a restic repository per copy in
+  `mirrors/<mesh>/<source>/repo/`, checking hashes, holding deletions, with
+  the quota over every copy. A source writes its own copy at
+  `/v1/repo/<source>/`; owners read it.
+- **Source:** `SourceRepo` (source.go): a catalog log of the repository, a
+  spool (`SpoolMax` 8 GB before restic's writes wait), and a sender a mirror
+  that lists the copy, then streams what it lacks in order and deletes what
+  the catalog dropped. Senders run all the time, not only in a run.
+- **Older sources still push the old way** (a map, fetched through the node);
+  what they send lands in the same store, so mirrors can be updated first.
+  A new source refuses a mirror from before ADR-014 with a message saying so:
+  **update mirrors before sources.**
+- **Measured:** two containers, real restic and real daemons, 1.2 GB: the copy
+  is 18 packs of 64 MB, `restic check` clean on the mirror's directory, the
+  source's spool 144 KB after; a second run of 477 MiB, mirrored included,
+  took 4 s.

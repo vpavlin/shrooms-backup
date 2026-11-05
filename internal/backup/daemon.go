@@ -205,7 +205,9 @@ type Daemon struct {
 	Restart    func()
 
 	mu      sync.Mutex
-	self    *Repo
+	self    *Repo       // the staging repository of before ADR-014, if any
+	src     *SourceRepo // this source's repository (ADR-014)
+	bulkC   *http.Client
 	mirrors map[string]*mirrorCopy       // by mirrorKey: mesh, then the source
 	sprs    map[string]map[string]string // mesh -> device -> its node's SPR
 	runs    []Run
@@ -218,8 +220,12 @@ type Daemon struct {
 }
 
 type mirrorCopy struct {
-	mesh    string
-	source  string
+	mesh   string
+	source string
+	// store is the copy, a restic repository in a directory (ADR-014);
+	// repo the map of a source from before, kept for its version handshake
+	// while it pushes the old way, its objects copied into store.
+	store   *Store
 	repo    *Repo
 	pending int64 // the newest map version asked for
 	missing int
@@ -262,22 +268,22 @@ func (d *Daemon) Open() error {
 	}
 	var err error
 	if d.Cfg.Source != nil {
-		if st := d.storeOf(d.Cfg.SourceMesh()); st != nil {
-			if d.self, err = OpenRepo("self", filepath.Join(d.State, "self"), st, d.Cache); err != nil {
-				return err
+		// The staging of before ADR-014, read until the mirrors hold it all.
+		if _, err := os.Stat(filepath.Join(d.State, "self", "map.json")); err == nil {
+			if st := d.storeOf(d.Cfg.SourceMesh()); st != nil {
+				if d.self, err = OpenRepo("self", filepath.Join(d.State, "self"), st, d.Cache); err != nil {
+					return err
+				}
 			}
-		} else {
-			d.Log.Warn("not backing up: this machine is not on the source's mesh yet", "mesh", d.Cfg.SourceMesh())
+		}
+		if d.src, err = OpenSource(d, filepath.Join(d.State, "source"), d.self); err != nil {
+			return err
 		}
 	}
 	for _, mesh := range d.Cfg.meshes() {
 		entries, _ := os.ReadDir(filepath.Join(d.State, "mirrors", mesh))
 		for _, e := range entries {
 			if !e.IsDir() {
-				continue
-			}
-			if d.storeOf(mesh) == nil {
-				d.Log.Warn("a copy kept for a mesh this machine is not on yet", "mesh", mesh, "source", e.Name())
 				continue
 			}
 			if _, err := d.mirrorOf(mesh, e.Name()); err != nil {
@@ -334,11 +340,18 @@ func (d *Daemon) migrateMirrors() error {
 
 // repoMade: this source's repository exists (restic init has run).
 func (d *Daemon) repoMade() bool {
-	if d.self == nil {
-		return false
+	return d.src != nil && d.src.Made()
+}
+
+// bulk is the client for objects: no limit on the whole request, which a
+// 64 MB pack over a slow link would pass, only on waiting for an answer.
+func (d *Daemon) bulk() *http.Client {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.bulkC == nil {
+		d.bulkC = &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: 2 * time.Minute, IdleConnTimeout: time.Minute}}
 	}
-	_, ok := d.self.Map().Objects["config"]
-	return ok
+	return d.bulkC
 }
 
 // storeOf is the storage on a mesh, nil when this machine has none there.
@@ -413,20 +426,26 @@ func (d *Daemon) mirrorOf(mesh, source string) (*mirrorCopy, error) {
 	if !deviceName.MatchString(source) {
 		return nil, fmt.Errorf("%q is not a device name", source)
 	}
+	// A node is only needed for copies pushed the old way (ADR-014).
 	st := d.storeOf(mesh)
 	if st == nil {
-		return nil, fmt.Errorf("this machine has no storage on the %s mesh", mesh)
+		st = noBlobs{}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if c, ok := d.mirrors[mirrorKey(mesh, source)]; ok {
 		return c, nil
 	}
-	r, err := OpenRepo(d.Cfg.Qualified(source, mesh), filepath.Join(d.State, "mirrors", mesh, source), st, d.Cache)
+	dir := filepath.Join(d.State, "mirrors", mesh, source)
+	r, err := OpenRepo(d.Cfg.Qualified(source, mesh), dir, st, d.Cache)
 	if err != nil {
 		return nil, err
 	}
-	c := &mirrorCopy{mesh: mesh, source: source, repo: r, pending: r.Map().Version, newest: make(chan Map, 1)}
+	store, err := OpenStore(d.Cfg.Qualified(source, mesh), filepath.Join(dir, "repo"))
+	if err != nil {
+		return nil, err
+	}
+	c := &mirrorCopy{mesh: mesh, source: source, repo: r, store: store, pending: r.Map().Version, newest: make(chan Map, 1)}
 	d.mirrors[mirrorKey(mesh, source)] = c
 	if d.ctx != nil {
 		go d.fetchLoop(d.ctx, c)
@@ -536,8 +555,8 @@ func (d *Daemon) Handler(mesh string) http.Handler {
 	})
 	mux.HandleFunc("GET /v1/presets", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, Presets) })
 	mux.HandleFunc("/v1/repo/{source}/", d.repo)
-	if local && d.self != nil {
-		mux.Handle("/self/", http.StripPrefix("/self", d.self.Handler(false)))
+	if local && d.src != nil {
+		mux.Handle("/self/", http.StripPrefix("/self", d.src.Handler()))
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := caller{local: local, mesh: mesh}
@@ -794,7 +813,7 @@ func (d *Daemon) putMirror(w http.ResponseWriter, r *http.Request) {
 	// The machine's limit over every mesh: each mesh's node may take the
 	// whole quota, so the sum is kept here, where the size is known before
 	// anything is fetched.
-	if held, limit := d.heldWithout(c.mesh, source)+body.Map.Size(true), d.quotaBytes(); held > limit {
+	if held, limit := d.heldWithout(c.mesh, source)+body.Map.Size(true), d.quotaBytes(); held > limit { // the old way
 		fail(w, http.StatusInsufficientStorage, fmt.Errorf("keeping %s's backup would take %s over its limit (%s of %s)",
 			d.Cfg.Qualified(source, c.mesh), d.Mesh.Self(), gbString(held), gbString(limit)))
 		return
@@ -832,7 +851,7 @@ func (d *Daemon) heldWithout(mesh, source string) int64 {
 	d.mu.Unlock()
 	var n int64
 	for _, mc := range copies {
-		n += mc.repo.Map().Size(true)
+		n += mc.size()
 	}
 	return n
 }
@@ -858,7 +877,7 @@ func (d *Daemon) mirrorStatus(mc *mirrorCopy) MirrorStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return MirrorStatus{Source: d.Cfg.Qualified(mc.source, mc.mesh), Mesh: mc.mesh, Adopted: m.Version, Pending: mc.pending,
-		Missing: mc.missing, MissingBytes: mc.missingBytes, Error: mc.err, Bytes: m.Size(true)}
+		Missing: mc.missing, MissingBytes: mc.missingBytes, Error: mc.err, Bytes: mc.size()}
 }
 
 // copyFor is the copy a request names, if the caller may read it.
@@ -937,6 +956,9 @@ func (d *Daemon) fetchLoop(ctx context.Context, mc *mirrorCopy) {
 		if err := mc.repo.Adopt(m); err != nil {
 			d.Log.Warn("mirror: adopt", "source", source, "err", err)
 			continue
+		}
+		if err := d.toStore(ctx, mc); err != nil {
+			d.Log.Warn("mirror: into the store", "source", source, "err", err)
 		}
 		d.Log.Info("mirror: in step", "source", source, "version", m.Version, "objects", len(m.Objects))
 	}
@@ -1050,9 +1072,121 @@ var retryPause = 20 * time.Second
 
 // repo serves a repository to restic, read-only: a mirror's copy of a
 // source, for the source itself or an owner restoring it.
+// A source writes its own copy over restic's REST protocol (ADR-014);
+// owners, and the source restoring, read it.
 func (d *Daemon) repo(w http.ResponseWriter, r *http.Request) {
-	if mc, _, ok := d.copyFor(w, r); ok {
-		http.StripPrefix("/v1/repo/"+r.PathValue("source"), mc.repo.Handler(true)).ServeHTTP(w, r)
+	c := callerOf(r)
+	mesh, source, err := d.resolve(c, r.PathValue("source"))
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	d.mu.Lock()
+	mirror := d.Cfg.Mirror
+	d.mu.Unlock()
+	writer := !c.local && c.name == source && c.mesh == mesh && mirror
+	var mc *mirrorCopy
+	if writer {
+		if mc, err = d.mirrorOf(mesh, source); err != nil {
+			fail(w, http.StatusBadRequest, err)
+			return
+		}
+	} else if mc, _, _ = d.copyFor(w, r); mc == nil {
+		return
+	}
+	h := mc.store.Handler(!writer, true, d.room)
+	http.StripPrefix("/v1/repo/"+r.PathValue("source"), h).ServeHTTP(w, r)
+}
+
+// room says whether n more bytes fit in what this machine keeps for others,
+// over every copy and mesh.
+func (d *Daemon) room(n int64) error {
+	if held, limit := d.heldBytes()+n, d.quotaBytes(); held > limit {
+		return fmt.Errorf("%w: %s would keep %s of its %s", ErrNoRoom, d.Mesh.Self(), gbString(held), gbString(limit))
+	}
+	return nil
+}
+
+func (d *Daemon) heldBytes() int64 {
+	d.mu.Lock()
+	copies := make([]*mirrorCopy, 0, len(d.mirrors))
+	for _, mc := range d.mirrors {
+		copies = append(copies, mc)
+	}
+	d.mu.Unlock()
+	var n int64
+	for _, mc := range copies {
+		n += mc.size()
+	}
+	return n
+}
+
+// size is what a copy takes: its store, or, before its old objects are
+// copied out of the node, its map's size.
+func (mc *mirrorCopy) size() int64 {
+	return max(mc.store.Size(), mc.repo.Map().Size(true))
+}
+
+// noBlobs is a node a machine does not have (no copies the old way).
+type noBlobs struct{}
+
+func (noBlobs) Put(context.Context, string, []byte) (string, error) { return "", errNoNode }
+func (noBlobs) Get(context.Context, string, bool) ([]byte, error)   { return nil, errNoNode }
+func (noBlobs) Has(context.Context, string, int64) bool             { return false }
+func (noBlobs) Fetch(context.Context, string) error                 { return errNoNode }
+func (noBlobs) Delete(context.Context, string) error                { return nil }
+
+var errNoNode = errors.New("no storage node on this mesh")
+
+// toStore copies what an old-way map holds out of the node into the copy's
+// store: live objects in, deleted ones held. Then the node lets them go.
+func (d *Daemon) toStore(ctx context.Context, mc *mirrorCopy) error {
+	m := mc.repo.Map()
+	have := mc.store.Keys()
+	n := 0
+	for k, o := range m.Objects {
+		if strings.HasPrefix(k, "locks/") {
+			continue
+		}
+		if _, ok := have[k]; !ok {
+			b, err := mc.repo.read(ctx, o)
+			if err != nil {
+				return fmt.Errorf("%s: %w", k, err)
+			}
+			if err := mc.store.Put(k, bytes.NewReader(b), int64(len(b)), nil); err != nil {
+				return fmt.Errorf("%s: %w", k, err)
+			}
+			n++
+		}
+		if o.Deleted != nil {
+			mc.store.Delete(k, true)
+		}
+	}
+	if n > 0 {
+		d.Log.Info("copied out of the storage node", "source", d.Cfg.Qualified(mc.source, mc.mesh), "objects", n)
+	}
+	return nil
+}
+
+// migrateCopies writes the copies kept in a node before ADR-014 into their
+// stores, once, in the background.
+func (d *Daemon) migrateCopies(ctx context.Context) {
+	d.mu.Lock()
+	copies := make([]*mirrorCopy, 0, len(d.mirrors))
+	for _, mc := range d.mirrors {
+		copies = append(copies, mc)
+	}
+	d.mu.Unlock()
+	for _, mc := range copies {
+		if len(mc.repo.Map().Objects) == 0 {
+			continue
+		}
+		if err := d.nodeReady(ctx, mc.mesh); err != nil {
+			continue
+		}
+		if err := d.toStore(ctx, mc); err != nil {
+			d.Log.Warn("copying a copy out of the storage node", "source", d.Cfg.Qualified(mc.source, mc.mesh), "err", err)
+		}
 	}
 }
 
@@ -1090,12 +1224,16 @@ func (d *Daemon) Start(ctx context.Context) {
 	go d.expireLoop(ctx)
 	if source != nil {
 		go d.schedule(ctx)
-		if d.self != nil {
+		if d.src != nil {
+			// Senders run all the time: a copy is caught up, and the old
+			// staging moved, without waiting for a run.
+			d.src.Sync(ctx, source.Mirrors)
 			if d.repoMade() && d.HasKey() {
 				go d.refreshKeys(ctx)
 			}
 		}
 	}
+	go d.migrateCopies(ctx)
 }
 
 func (d *Daemon) expireLoop(ctx context.Context) {
@@ -1106,11 +1244,16 @@ func (d *Daemon) expireLoop(ctx context.Context) {
 		case <-time.After(time.Hour):
 		}
 		d.mu.Lock()
-		repos := []*Repo{}
+		repos, stores := []*Repo{}, []*Store{}
 		for _, mc := range d.mirrors {
-			repos = append(repos, mc.repo)
+			repos, stores = append(repos, mc.repo), append(stores, mc.store)
 		}
 		d.mu.Unlock()
+		for _, st := range stores {
+			if n, err := st.Expire(Hold); err != nil || n > 0 {
+				d.Log.Info("held objects expired", "source", st.Name, "count", n, "err", err)
+			}
+		}
 		for _, r := range repos {
 			if n, err := r.Expire(ctx, Hold); err != nil || n > 0 {
 				d.Log.Info("held objects expired", "source", r.Name, "count", n, "err", err)
@@ -1195,7 +1338,9 @@ func (d *Daemon) resticWith(ctx context.Context, key string, args ...string) (st
 		"RESTIC_PASSWORD_FILE="+key,
 		"RESTIC_CACHE_DIR="+filepath.Join(d.State, "restic-cache"),
 		// Its progress every 2 s: without a terminal it says it once a minute.
-		"RESTIC_PROGRESS_FPS=0.5")
+		"RESTIC_PROGRESS_FPS=0.5",
+		// 64 MB packs: a quarter of the objects to send and list (ADR-014).
+		"RESTIC_PACK_SIZE=64")
 	// Two writers into one buffer, on exec's two copying goroutines: locked.
 	var out lockedBuffer
 	sw := &statusWriter{out: &out, status: d.resticStatus}
@@ -1287,26 +1432,19 @@ func (d *Daemon) resticStatus(line []byte) {
 
 func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 	s := d.source()
-	mesh := d.Cfg.SourceMesh()
-	if d.self == nil {
-		return fmt.Errorf("this machine is not on the %s mesh, which it backs up over", mesh)
+	if d.src == nil {
+		return errors.New("this source has no repository open")
 	}
 	if _, err := os.Stat(d.Key); err != nil {
 		return fmt.Errorf("no key (%s): set it with the card, or `shrooms-backup key`", d.Key)
 	}
-	// The mirrors' nodes first: learning one restarts ours, which must not
-	// happen while the mirrors fetch from it.
-	for _, mirror := range s.Mirrors {
-		if base, err := d.mirrorURL(mirror); err == nil {
-			var in Info
-			if d.getJSON(ctx, base+"/v1/info", &in) == nil {
-				d.learnSPR(mesh, mirror, in.SPR)
-			}
+	// The old staging is read through this machine's node until moved.
+	if d.self != nil {
+		if err := d.nodeReady(ctx, d.Cfg.SourceMesh()); err != nil {
+			return err
 		}
 	}
-	if err := d.nodeReady(ctx, mesh); err != nil {
-		return err
-	}
+	d.src.Sync(d.ctxOr(ctx), s.Mirrors)
 	if !d.repoMade() {
 		if _, err := d.restic(ctx, "init"); err != nil {
 			return err
@@ -1339,15 +1477,74 @@ func (d *Daemon) runSource(ctx context.Context, run *Run) error {
 	if _, err := d.restic(ctx, forget...); err != nil {
 		return err
 	}
-	m := d.self.Map()
-	run.Stored = m.Size(false)
-	if err := d.pushAll(ctx, m, run); err != nil {
+	run.Stored = d.src.Size()
+	if err := d.waitMirrors(ctx, s.Mirrors, run); err != nil {
 		return err
 	}
-	if !s.KeepLocal {
-		d.unstage(ctx, m)
-	}
 	d.refreshKeys(ctx)
+	return nil
+}
+
+// ctxOr is the daemon's own context, which outlives a run: the senders
+// keep going after it (ADR-014).
+func (d *Daemon) ctxOr(ctx context.Context) context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.ctx != nil {
+		return d.ctx
+	}
+	return ctx
+}
+
+// waitMirrors waits until every mirror holds the repository as it is, as
+// long as each keeps moving (ADR-012), and says how far each is.
+func (d *Daemon) waitMirrors(ctx context.Context, mirrors []string, run *Run) error {
+	d.setProgress(func(p *Progress) { p.Phase = "mirrors" })
+	total := d.src.Size()
+	done := map[string]bool{}
+	for {
+		for _, m := range mirrors {
+			if done[m] {
+				continue
+			}
+			left, synced, why, moved := d.src.Pending(m)
+			d.setProgress(func(p *Progress) {
+				mp := MirrorProgress{Bytes: total, Done: max(total-left, 0), OK: synced, Error: why}
+				if synced {
+					mp.Done, mp.Error = total, ""
+				}
+				p.Mirrors[m] = mp
+			})
+			switch {
+			case synced:
+				done[m], run.Mirrors[m] = true, "ok"
+			case time.Since(moved) > Stalled:
+				done[m] = true
+				run.Mirrors[m] = fmt.Sprintf("%s took nothing for %v (%s still to go)", m, Stalled, humanBytes(left))
+				if why != "" {
+					run.Mirrors[m] += ": " + why
+				}
+			}
+		}
+		if len(done) == len(mirrors) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollEvery):
+		}
+	}
+	var bad []string
+	for m, st := range run.Mirrors {
+		if st != "ok" {
+			bad = append(bad, m)
+		}
+	}
+	if len(bad) > 0 {
+		slices.Sort(bad)
+		return fmt.Errorf("not on every mirror: %s", strings.Join(bad, ", "))
+	}
 	return nil
 }
 
@@ -1360,58 +1557,6 @@ func (d *Daemon) firstToday(now time.Time) bool {
 		}
 	}
 	return true
-}
-
-// pushAll hands the map to every mirror and waits until each holds it.
-func (d *Daemon) pushAll(ctx context.Context, m Map, run *Run) error {
-	spr := ""
-	if st, ok := d.storeOf(d.Cfg.SourceMesh()).(*Storage); ok {
-		spr, _ = st.SPR(ctx)
-	}
-	mirrors, size := d.source().Mirrors, m.Size(false) // not under setProgress's lock
-	d.setProgress(func(p *Progress) {
-		p.Phase = "mirrors"
-		for _, mirror := range mirrors {
-			p.Mirrors[mirror] = MirrorProgress{Bytes: size}
-		}
-	})
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, mirror := range d.source().Mirrors {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := d.push(ctx, mirror, spr, m)
-			d.setProgress(func(p *Progress) {
-				mp := p.Mirrors[mirror]
-				if err != nil {
-					mp.Error = err.Error()
-				} else {
-					mp.OK, mp.Done = true, mp.Bytes
-				}
-				p.Mirrors[mirror] = mp
-			})
-			mu.Lock()
-			if err != nil {
-				run.Mirrors[mirror] = err.Error()
-			} else {
-				run.Mirrors[mirror] = "ok"
-			}
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	var bad []string
-	for m, s := range run.Mirrors {
-		if s != "ok" {
-			bad = append(bad, m)
-		}
-	}
-	if len(bad) > 0 {
-		slices.Sort(bad)
-		return fmt.Errorf("not on every mirror: %s", strings.Join(bad, ", "))
-	}
-	return nil
 }
 
 func (d *Daemon) localURL() string {
@@ -1433,60 +1578,6 @@ func (d *Daemon) mirrorURL(mirror string) (string, error) {
 	return "http://" + net.JoinHostPort(a.String(), strconv.Itoa(Port)), nil
 }
 
-func (d *Daemon) push(ctx context.Context, mirror, spr string, m Map) error {
-	base, err := d.mirrorURL(mirror)
-	if err != nil {
-		return err
-	}
-	// Its node first, so ours can reach it (and it ours, from our SPR).
-	var in Info
-	if err := d.getJSON(ctx, base+"/v1/info", &in); err != nil {
-		return err
-	}
-	d.learnSPR(d.Cfg.SourceMesh(), mirror, in.SPR)
-	body, _ := json.Marshal(map[string]any{"spr": spr, "map": m})
-	req, _ := http.NewRequestWithContext(ctx, "PUT", base+"/v1/mirror/"+d.Mesh.Self(), bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("%s refused: %s", mirror, resp.Status)
-	}
-	// Until it holds the run, as long as its fetch keeps moving: a first run
-	// of 150 GB takes longer than any fixed wait (fetchAll).
-	total := m.Size(false)
-	moved, least := time.Now(), int64(-1)
-	for {
-		var st MirrorStatus
-		if err := d.getJSON(ctx, base+"/v1/mirror/"+d.Mesh.Self(), &st); err == nil {
-			if st.Adopted >= m.Version {
-				return nil
-			}
-			if st.Pending >= m.Version {
-				if least < 0 || st.MissingBytes < least {
-					moved, least = time.Now(), st.MissingBytes
-				}
-				d.setProgress(func(p *Progress) {
-					mp := p.Mirrors[mirror]
-					mp.Done = max(total-st.MissingBytes, 0)
-					p.Mirrors[mirror] = mp
-				})
-			}
-		}
-		if time.Since(moved) > Stalled {
-			return fmt.Errorf("%s fetched nothing for %v (%s still to go)", mirror, Stalled, humanBytes(max(least, 0)))
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(pollEvery):
-		}
-	}
-}
-
 func (d *Daemon) getJSON(ctx context.Context, url string, v any) error {
 	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	resp, err := d.client.Do(req)
@@ -1498,19 +1589,4 @@ func (d *Daemon) getJSON(ctx context.Context, url string, v any) error {
 		return fmt.Errorf("%s: %s", url, resp.Status)
 	}
 	return json.NewDecoder(resp.Body).Decode(v)
-}
-
-// unstage empties this machine's node of the run once every mirror holds
-// it: the source keeps no second copy (ADR-001). The map stays; reads go to
-// the mirrors.
-func (d *Daemon) unstage(ctx context.Context, m Map) {
-	n := 0
-	store := d.storeOf(d.Cfg.SourceMesh())
-	for _, o := range m.Objects {
-		if err := store.Delete(ctx, o.CID); err == nil {
-			n++
-		}
-	}
-	d.Cache.Clear()
-	d.Log.Info("staging emptied", "objects", n)
 }
