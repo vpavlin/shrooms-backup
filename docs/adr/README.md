@@ -16,3 +16,4 @@
 | [012](012-a-run-shows-its-progress-and-waits-while-it-moves.md) | A run shows its progress, and waits for a mirror as long as it moves | accepted; built |
 | [013](013-mirrors-fetch-past-gaps-patched-storage.md) | Mirrors fetch past what they cannot find yet; storage patched for many manifests | accepted; built — logos-storage pinned to vpavlin/nim-codex@0f3e5cf |
 | [014](014-mirrors-over-restics-rest-protocol.md) | Mirrors over restic's REST protocol, pushed by the source; Logos Storage a tier of its own | accepted; built — mirrors are restic repositories in directories, sources stream to them; update mirrors before sources |
+| [015](015-a-missed-backup-runs-when-the-machine-is-back.md) | A missed backup runs when the machine is back | accepted; built — the schedule is read from the wall clock every minute; a scheduled time passed with no run since runs as soon as a mirror is online on the mesh |

@@ -1284,19 +1284,109 @@ func (d *Daemon) expireLoop(ctx context.Context) {
 	}
 }
 
+// scheduleTick is how often the schedule is looked at.
+const scheduleTick = time.Minute
+
+// schedule runs the backups: at their times, and a missed one as soon as this
+// machine is back on the mesh.
+//
+// It used to sleep until the next time. A machine off at 03:30 never ran
+// that backup: on start it only looked forward. And a laptop asleep through
+// it ran it hours late, because a timer does not count suspended time. Now it
+// looks at the wall clock every minute, and when the latest scheduled time has
+// passed with no run started since, it runs as soon as a mirror is online
+// (Václav, 2026-11-09: "if it misses, then trigger it immediately when it
+// comes online and connects to the mesh").
 func (d *Daemon) schedule(ctx context.Context) {
+	next := nextTime(time.Now(), d.source().Times)
+	d.Log.Info("next backup", "at", next.Format(time.RFC3339))
+	tick := time.NewTicker(scheduleTick)
+	defer tick.Stop()
 	for {
-		next := nextTime(time.Now(), d.source().Times)
-		d.Log.Info("next backup", "at", next.Format(time.RFC3339))
 		select {
 		case <-ctx.Done():
 			return
 		case <-d.wake:
+			next = nextTime(time.Now(), d.source().Times)
+			d.Log.Info("next backup", "at", next.Format(time.RFC3339))
 			continue
-		case <-time.After(time.Until(next)):
+		case <-tick.C:
+		}
+		now := time.Now()
+		due := !now.Before(next)
+		missed := d.missedRun(now)
+		if !due && !missed {
+			continue
+		}
+		if !d.mirrorOnline() {
+			// Off the mesh, or no mirror up: a run now would only wait and
+			// fail. It goes when one is back; a missed run stays missed.
+			continue
+		}
+		if missed && !due {
+			d.Log.Info("running a missed backup", "was_due", lastTime(now, d.source().Times).Format(time.RFC3339))
 		}
 		d.RunSource(ctx)
+		next = nextTime(time.Now(), d.source().Times)
+		d.Log.Info("next backup", "at", next.Format(time.RFC3339))
 	}
+}
+
+// missedRun reports a scheduled time that has passed with no run started at
+// or after it. Any run counts, failed ones too: a failure is retried at the
+// next time, not every minute.
+func (d *Daemon) missedRun(now time.Time) bool {
+	due := lastTime(now, d.source().Times)
+	if due.IsZero() {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := len(d.runs) - 1; i >= 0; i-- {
+		if !d.runs[i].Started.Before(due) {
+			return false
+		}
+	}
+	return true
+}
+
+// mirrorOnline reports whether any of this source's mirrors is online on the
+// mesh it backs up over: this machine is connected, and has somewhere to send.
+func (d *Daemon) mirrorOnline() bool {
+	if d.Mesh == nil {
+		return true
+	}
+	want := map[string]bool{}
+	for _, m := range d.source().Mirrors {
+		want[m] = true
+	}
+	mesh := d.Cfg.SourceMesh()
+	for _, p := range d.Mesh.Peers() {
+		if want[p.Name] && p.Online && (p.Mesh == mesh || p.Mesh == "" || mesh == "") {
+			return true
+		}
+	}
+	return false
+}
+
+// lastTime is the latest of times (HH:MM, local) at or before now, within the
+// last day; zero for no times.
+func lastTime(now time.Time, times []string) time.Time {
+	var best time.Time
+	for _, t := range times {
+		hm, err := time.Parse("15:04", t)
+		if err != nil {
+			continue
+		}
+		c := time.Date(now.Year(), now.Month(), now.Day(), hm.Hour(), hm.Minute(), 0, 0, now.Location())
+		if c.After(now) {
+			c = c.AddDate(0, 0, -1)
+		}
+		if best.IsZero() || c.After(best) {
+			best = c
+		}
+	}
+	return best
 }
 
 // nextTime is the first of times (HH:MM, local) after now.
