@@ -174,13 +174,14 @@ func (m *Mesh) SetPeers(self string, peers []Peer) {
 	st := meshStatus{Name: self}
 	names, meshOf := map[netip.Addr]string{}, map[netip.Addr]string{}
 	for _, p := range peers {
+		online := p.Online
 		st.Peers = append(st.Peers, struct {
 			Name      string `json:"name"`
 			Mesh      string `json:"mesh"`
 			Overlay   string `json:"overlay"`
 			OverlayV4 string `json:"overlay_v4"`
 			Online    *bool  `json:"online"`
-		}{Name: p.Name, Mesh: p.Mesh, Overlay: p.Overlay})
+		}{Name: p.Name, Mesh: p.Mesh, Overlay: p.Overlay, Online: &online})
 		a := netip.MustParseAddr(p.Overlay).Unmap()
 		names[a], meshOf[a] = p.Name, p.Mesh
 	}
